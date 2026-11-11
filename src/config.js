@@ -11,19 +11,20 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.3.2';
-export const VERSION_ID = '2026-11-11 06H37M';
+export const VERSION = '1.3.4';
+export const VERSION_ID = '2026-11-11 14H21M';
 
 // none / info / urgent
 export const NOTICE = {
-  id: VERSION_ID,
+  // the notice hasn't changed since 1.3.2: its own id, so players who read it don't see it again
+  id: '2026-11-11 06H37M',
   mode: 'info',
   text: `The numbers look right so far. Speed Jam and Memory haven't been checked yet: that's next.\nFound something off? Message me (Rai) in the in-game chat if online, or in the official oss!idle Discord`,
 };
 
 export const CHANGELOG = {
   id: VERSION_ID,
-  text: `v${VERSION} · 11 Nov 2026\n• Redesigned levels tab\n• Scans again by itself when you change the queue\n• Scanning works with Edit Queue open\n• Retries when the simulator is busy\n• Local estimate uses all your recent plays\n• Option to turn off animations\n• New time formatting\n• Bunch of fixes`,
+  text: `v${VERSION} · 11 Nov 2026\n• Overall level and rebirth in the levels tab\n• Queue changes update almost instantly, without a full scan\n• Local estimate uses your plays from the last 24 hours\n• Shorter, clearer texts\n• Turning off animations also turns off the level up colour\n• Bunch of fixes`,
 };
 
 // ---------------------------------------------------------------------
@@ -44,7 +45,14 @@ export const SETTINGS = {
   // when the simulator is busy: seconds to wait before each new try
   retryWaitsSec: [2, 4, 8, 16, 32],
   // after the queue changes: seconds without another change before scanning again
-  rescanSettleSec: 3,
+  // after a queue change, how long the queue has to stay the same before the update: right away when only
+  // repeats changed, a moment when maps were added, removed or moved (so a few edits in a row update once)
+  rescanWaitSec: { repeats: 0, maps: 1 },
+  // how often the queue is checked for changes, while the window is open
+  queueCheckMs: 500,
+  // a queue change is updated from the stored simulator answers, no new calls except for new maps, while the
+  // last full scan is younger than this; past it, a full scan
+  quickUpdateMaxMin: 60,
   colors: {
     now: '#3987e5',
     prestige: '#ff8ab7',
@@ -80,7 +88,7 @@ export const TEXT = {
     animations: 'Animations',
     animationsTip: 'Turn off to stop every animation in this window, for performance.',
     rescan: 'Rescan when the queue changes',
-    rescanTip: 'When you add, remove or move maps, or change a rate or repeats, the add-on scans again by itself, {sec} seconds after your last change. Playing through the queue doesn\'t count as a change.',
+    rescanTip: 'When you add, remove or move maps, or change a rate or repeats, the add-on updates by itself: right away for repeats, {sec} second after adding, removing or moving maps. It uses the answers it already has, so only new maps ask the simulator. Once the last full scan is over {min} minutes old, it scans again in full. Playing through the queue doesn\'t count as a change.',
     localPlays: 'Local plays',
     localPlaysTip: 'For the XP tab\'s local estimate: how many of your newest plays of each map (at the queue\'s rate, last 24 hours) it averages. Fewer: closer to your current level. More: a steadier average. {n} by default.',
     memoryPlays: 'Memory plays',
@@ -90,8 +98,10 @@ export const TEXT = {
     simulating: 'Simulating the queue…',
     busy: 'Simulator busy, retrying in {sec}s (try {n} of {of})…',
     busyNote: 'simulator busy, retrying (try {n} of {of})',
-    queueChanged: 'Queue changed: scanning again in a moment…',
+    queueChanged: 'Queue changed: updating in a moment…',
     rescanning: 'Queue changed: scanning again…',
+    updating: 'Queue changed: updating…',
+    updated: 'Updated from stored answers ({n} of {of} plays estimated). Press Scan queue for exact numbers.',
     queueChangedOff: 'Your queue changed since the scan. Press Scan queue to include it.',
     queueBack: 'The queue is back as scanned.',
     newRuns: 'Scan again to use the new number of runs.',
@@ -106,6 +116,10 @@ export const TEXT = {
     prestige: 'Prestige',
     bar: 'Levels to prestige',
     readyNow: 'ready now',
+    overall: 'Overall',
+    rebirth: 'Rebirth',
+    toRebirth: 'To rebirth',
+    rebirthAt: 'Rebirth at overall Lv {n}',
     keepPlaying: 'If you keep playing this queue',
     xpToGo: '{xp} XP to go',
     mapsTitle: 'Where its XP comes from',

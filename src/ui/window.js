@@ -15,6 +15,7 @@ export let styleEl = null;
 export let scanToken = 0;
 /** Checks for new real plays every 2 seconds while the XP tab is open. */
 export let liveTimer = null;
+export let queueTimer = null;
 
 
 export const mount = (meta, host) => {
@@ -44,7 +45,7 @@ export const mount = (meta, host) => {
             <span class="qs-dim" title="${esc(TEXT.options.runsTip)}">${TEXT.options.runs}</span><input id="qs-runs" type="number" min="1" max="5" step="1" value="${SETTINGS.runsPerPlay}" style="width:44px;">
             <span class="qs-dim" style="margin-left:8px;" title="${esc(tx(TEXT.options.localPlaysTip, { n: SETTINGS.localPlays }))}">${TEXT.options.localPlays}</span><input id="qs-local" type="number" min="1" max="50" step="1" value="${SETTINGS.localPlays}" style="width:44px;">
             <label class="qs-dim" style="display:flex; align-items:center; gap:4px; margin-left:8px;" title="${esc(TEXT.options.animationsTip)}"><input id="qs-anim" type="checkbox"${SETTINGS.animations ? ' checked' : ''} style="margin:0;"> ${TEXT.options.animations}</label>
-            <label class="qs-dim" style="display:flex; align-items:center; gap:4px; margin-left:8px;" title="${esc(tx(TEXT.options.rescanTip, { sec: SETTINGS.rescanSettleSec }))}"><input id="qs-auto" type="checkbox"${SETTINGS.rescanOnQueueChange ? ' checked' : ''} style="margin:0;"> ${TEXT.options.rescan}</label>
+            <label class="qs-dim" style="display:flex; align-items:center; gap:4px; margin-left:8px;" title="${esc(tx(TEXT.options.rescanTip, { sec: SETTINGS.rescanWaitSec.maps, min: SETTINGS.quickUpdateMaxMin }))}"><input id="qs-auto" type="checkbox"${SETTINGS.rescanOnQueueChange ? ' checked' : ''} style="margin:0;"> ${TEXT.options.rescan}</label>
             <span class="qs-dim" style="margin-left:auto;" title="${esc(TEXT.options.memoryPlaysTip)}">${TEXT.options.memoryPlays}</span><input id="qs-memplays-top" type="number" min="1" max="40" step="1" value="${SETTINGS.memoryPlays}" style="width:44px;">
           </div>
           <div id="qs-status" class="qs-dim" style="margin-top:6px;"></div>
@@ -96,7 +97,6 @@ export const mount = (meta, host) => {
   let liveNewest = 0;
   if (liveTimer) clearInterval(liveTimer);
   liveTimer = setInterval(async () => {
-    watchQueue();
     // only while the XP tab of a finished scan is on screen; the game's database is local, so this costs no call
     if (!root || !shown() || scanning || !lastResult || activeTab !== 'xp') return;
     const [queue, ctx, , r] = lastResult;
@@ -137,7 +137,14 @@ export const mount = (meta, host) => {
   let changedKey = null, changedAt = 0;
   /** A scan the player stopped (or closed the window on) isn't started again by itself until they scan. */
   let autoPaused = false;
-  const QUEUE_SETTLE_MS = SETTINGS.rescanSettleSec * 1000;
+  /** How long a change waits before the update: none when only repeats changed, a moment when the maps did. */
+  const waitFor = (then, now) => {
+    const maps = (key) => key.map(k => k.replace(/x\d+$/, '')).join('|');
+    return (maps(then) === maps(now) ? SETTINGS.rescanWaitSec.repeats : SETTINGS.rescanWaitSec.maps) * 1000;
+  };
+  /** The queue is checked every SETTINGS.queueCheckMs, only while the window is open. */
+  const startQueueWatch = () => { if (!queueTimer) queueTimer = setInterval(watchQueue, SETTINGS.queueCheckMs); };
+  const stopQueueWatch = () => { if (queueTimer) { clearInterval(queueTimer); queueTimer = null; } };
   const watchQueue = () => {
     if (!root || !shown() || !scanKey || autoPaused) return;
     const q = readQueue();
@@ -165,13 +172,13 @@ export const mount = (meta, host) => {
     if (!changedKey || changedKey.join('|') !== key.join('|')) {
       changedKey = key;
       changedAt = now;
-      statusEl.textContent = TEXT.status.queueChanged;
-      return;
+      if (waitFor(scanKey, key) > 0) { statusEl.textContent = TEXT.status.queueChanged; return; }
     }
-    if (now - changedAt < QUEUE_SETTLE_MS) return;
+    if (now - changedAt < waitFor(scanKey, key)) return;
     changedKey = null;
     if (scanning) { scanToken++; setScanning(false); }
-    void scan(TEXT.status.rescanning);
+    const quick = !!lastResult && lastFullAt > 0 && now - lastFullAt < SETTINGS.quickUpdateMaxMin * 60000;
+    void scan(quick ? TEXT.status.updating : TEXT.status.rescanning, quick);
   };
 
   runsInput.addEventListener('change', () => {
@@ -220,7 +227,7 @@ export const mount = (meta, host) => {
     const r = root.getBoundingClientRect();
     root.style.top = `${Math.max(0, Math.round((innerHeight - r.height) / 2))}px`;
   };
-  const show = () => { root.style.display = 'flex'; };
+  const show = () => { root.style.display = 'flex'; startQueueWatch(); };
   /** Whether a scan is running: the button reads Stop while it is. */
   let scanning = false;
   const setScanning = (on) => {
@@ -237,7 +244,7 @@ export const mount = (meta, host) => {
     if (nowEl.classList.contains('qs-busy')) nowEl.dataset.busy = 'Out of date: press Scan queue';
     statusEl.textContent = why;
   };
-  const hide = () => { closeConsole(); if (scanning) autoPaused = true; stopScan(TEXT.status.closed); root.style.display = 'none'; };
+  const hide = () => { closeConsole(); stopQueueWatch(); changedKey = null; if (scanning) autoPaused = true; stopScan(TEXT.status.closed); root.style.display = 'none'; };
   const shown = () => !!root && root.style.display === 'flex';
   $('.qs-x').onclick = hide;
   /** Mark as read, on the warning sign and on the changelog: each turns gray and stays so until its id or text changes. */
@@ -292,17 +299,23 @@ export const mount = (meta, host) => {
 
   /** While the simulator is busy: until when, and what to say beside the progress. */
   let busyUntil = 0, busyNote = '';
-  const scan = async (why = '') => {
+  /** When the last full scan finished: a queue change is updated from its answers until it gets old. */
+  let lastFullAt = 0;
+  /** A scan. `quick`: after a queue change, from the stored answers (only new maps ask the simulator), with the
+   *  last result left on screen until the new one is ready. */
+  const scan = async (why = '', quick = false) => {
     const token = ++scanToken;
     autoPaused = false;
     changedKey = null;
     closeConsole();
     $('#qs-start-hint').style.display = 'none';
     // the Strain Status of the last scan is grayed out until this one is done
-    nowEl.classList.add('qs-busy');
-    nowEl.dataset.busy = 'Scanning…';
+    if (!quick) {
+      nowEl.classList.add('qs-busy');
+      nowEl.dataset.busy = 'Scanning…';
+      outEl.innerHTML = '';
+    }
     setScanning(true);
-    outEl.innerHTML = '';
     statusEl.textContent = why;
     const scanStarted = Date.now();
     const fail = (msg) => { logProblem('scan', msg); if (token === scanToken) { outEl.innerHTML = `<div class="qs-err">${esc(msg)}</div>`; statusEl.textContent = ''; } };
@@ -346,6 +359,7 @@ export const mount = (meta, host) => {
         delaySec: Math.max(0, num(setting('autopilotDelay', 30))),
         rate: num(setting('rate', 1)) || 1,
         mods: Array.isArray(setting('mods', [])) ? setting('mods', []) : [],
+        quick,
       };
       statusEl.textContent = TEXT.status.simulating;
       const result = await forecast(queue, ctx, (calls) => { if (token === scanToken) statusEl.textContent = `${TEXT.status.simulating} ${calls} sim call${calls === 1 ? '' : 's'}${Date.now() < busyUntil ? ` · ${busyNote}` : ''}`; }, token);
@@ -354,11 +368,13 @@ export const mount = (meta, host) => {
       result.sv = await svCurves(queue, result, memPlaysOf(), token, () => {
         if (token === scanToken) statusEl.textContent = `Checking Speed Jam / Memory maps… ${result.counts().calls} sim calls`;
       });
+      result.setApprox(false);
       if (token !== scanToken) return;
       saveCache();
       result.local = await localPlaysOf(row, queue, ctx.rate, localCount());
       if (token !== scanToken) return;
       result.scannedAt = Date.now();
+      if (!quick) lastFullAt = result.scannedAt;
       result.scanMs = result.scannedAt - scanStarted;
       liveNewest = 0;
       renderResult(queue, ctx, now, result);
@@ -368,6 +384,8 @@ export const mount = (meta, host) => {
       nowEl.classList.remove('qs-busy');
       if (firstResult) center(); else centerVertically();
       const { calls: asked, fromCache: reused } = result.counts();
+      const estimated = result.plays.filter(p => p.approx).length;
+      if (quick && estimated) { statusEl.textContent = tx(TEXT.status.updated, { n: estimated, of: result.plays.length }); return; }
       statusEl.textContent = `${queue.entries.length} map${queue.entries.length === 1 ? '' : 's'} in the queue${queue.label ? ` (${queue.label})` : ''}. ${asked} new sim call${asked === 1 ? '' : 's'}, ${reused} answer${reused === 1 ? '' : 's'} reused. Plays ${ctx.delaySec}s apart (your autopilot delay).`;
     } catch (e) {
       saveCache();
@@ -573,14 +591,14 @@ export const mount = (meta, host) => {
     if (reach >= 0) {
       const leave = r.samples.findIndex((s, i) => i > reach && !inPeak(s.bar));
       outlook.push(['Leaves Sweet Spot', leave >= 0
-        ? `at <b>${dur(r.samples[leave].t)}</b>, ${r.samples[leave].bar >= BAR_ZONES[1] ? 'pushed past it: play easier maps' : 'cooled below it: play harder maps'}`
+        ? `in <b>${dur(r.samples[leave].t)}</b>, ${r.samples[leave].bar >= BAR_ZONES[1] ? 'pushed past it: play easier maps' : 'cooled below it: play harder maps'}`
         : `<b>never</b> in ${dur(ctx.hours * 3600)}: this queue holds you there`]);
     }
     const fat = when(b => b >= XP_CUT);
     outlook.push(['<span style="color:#f87171">XP cut</span>', now.minutes >= now.knots[3]
       ? '<b style="color:#f87171">already</b>: past 300 min of strain'
       : fat !== undefined
-        ? `<b style="color:#f87171">at ${dur(fat)}</b>, when strain passes 300 min`
+        ? `<b style="color:#f87171">in ${dur(fat)}</b>, when strain passes 300 min`
         : `<b>never</b> in ${dur(ctx.hours * 3600)}: strain stays under 300 min`]);
     if (r.loopSec) {
       const drift = r.loopDrift;
@@ -674,7 +692,6 @@ export const mount = (meta, host) => {
       // a real play already carries the fatigue, mindblock and bonuses it was played with
       const realOf = (p, sk) => { const a = realAvg[queue.entries[p.entry].beatmapId]; return local(p) ? a.xp[sk] / a.n : 0; };
       const sameOf = (p, sk) => (local(p) ? xpOf(p, sk) : 0);
-      const localPlays = r.plays.filter(local).length;
       // Speed Jam and Memory change with Tries, so an average of past plays is rough, when there is one
       const ROUGH_REAL = ['speedjam', 'memory'].filter(sk => r.plays.some(p => realOf(p, sk) > 0));
       const cmpRows = SKILLS.map(sk => ({ sk, sim: perHour(p => simOf(p, sk)), matched: perHour(p => xpOf(p, sk)), same: perHour(p => sameOf(p, sk)), real: perHour(p => realOf(p, sk)) }))
@@ -694,15 +711,18 @@ export const mount = (meta, host) => {
       r.localSummary = { maps: mapsEnough, of: queueMaps.length, plays: queueMaps.reduce((t, e) => t + playsOfMap(e.beatmapId), 0), real: total.real, same: total.same, perMap: Object.fromEntries(queueMaps.map(e => [e.beatmapId, playsOfMap(e.beatmapId)])) };
       const n = queueMaps.length;
       const totalLocal = queueMaps.reduce((t, e) => t + playsOfMap(e.beatmapId), 0);
+      const playsText = `${totalLocal} play${totalLocal === 1 ? '' : 's'}`;
       const localLine = !mapsPlayed
-        ? '<b style="color:#fca5a5">No local plays found.</b> None of the queue\'s maps were played at the queue\'s rates in the last 24 hours.'
-        : `${allMaps ? `<b style="color:#4ade80">All ${n} map${n === 1 ? '' : 's'} played</b> (${totalLocal} play${totalLocal === 1 ? '' : 's'}).` : `<b style="color:#facc15">Played only ${mapsEnough} map${mapsEnough === 1 ? '' : 's'} out of ${n}</b> (${totalLocal} play${totalLocal === 1 ? '' : 's'}).`} Local estimates cover ${allMaps ? 'every play' : `${localPlays} of the ${r.plays.length} plays`} in the forecast, repeats included${allMaps ? '' : `, so they are for ${mapsEnough === 1 ? 'that map' : `those ${mapsEnough} maps`} alone`}. <span style="color:#fb923c">Orange</span>: more than a quarter away from the same plays with your bonuses.`;
+        ? '<b style="color:#fca5a5">No queue maps played in 24H</b> at the queue\'s rates.'
+        : allMaps
+          ? `<b style="color:#4ade80">All ${n} map${n === 1 ? '' : 's'} played in 24H</b> (${playsText}). <span style="color:#fb923c">Orange</span>: over 25% off.`
+          : `<b style="color:#facc15">Only ${mapsEnough} out of ${n} maps were played, local estimates will be inaccurate</b> (${playsText}). <span style="color:#fb923c">Orange</span>: over 25% off.`;
       const partial = mapsEnough > 0 && !allMaps;
-      const liveNote = `<span style="color:#4ade80;" title="The local estimate is read again whenever a new play is saved, checked every 2 seconds while this tab is open.">● Live</span>${r.localAt ? ` <span class="qs-dim">updated ${new Date(r.localAt).toLocaleTimeString()} after a new play</span>` : ''}`;
+      const liveNote = `<span style="color:#4ade80;" title="Read again after every new play.${r.localAt ? ` Last updated ${new Date(r.localAt).toLocaleTimeString()}.` : ''}">● Live</span>`;
       const mapList = `<details class="qs-local-list"${localOpen ? ' open' : ''} style="margin-top:4px;"><summary class="qs-dim" style="cursor:pointer;">Local plays per map</summary>
           <table style="margin-top:4px;"><thead><tr><th>Map</th><th class="n">Rate</th><th class="n" title="Your plays of this map at the queue's rate in the last 24 hours.">Plays</th><th title="How many of your newest plays of this map at the queue's rate the estimate averages: the newest, up to ${localCount()} (the Local plays option).">Local estimate</th></tr></thead><tbody>
           ${queueMaps.map(e => { const k = playsOfMap(e.beatmapId), day = realAvg[e.beatmapId] && realAvg[e.beatmapId].day; const dayCell = day ? day : day === 0 || !k ? '<span class="qs-dim">0</span>' : '<span class="qs-dim">–</span>';
-            return `<tr><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${rateOfEntry(e)}×</td><td class="n">${dayCell}</td><td>${!k ? '<span style="color:#f87171">Not played in 24H</span>' : k >= localCount() ? `<span style="color:#4ade80">used ${k}</span>` : `<span style="color:#facc15" title="Fewer plays than the Local plays option (${localCount()}): the average is rougher">used ${k}</span>`}</td></tr>`; }).join('')}
+            return `<tr><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${rateOfEntry(e)}×</td><td class="n">${dayCell}</td><td>${!k ? '<span style="color:#f87171">Not played yet</span>' : k >= localCount() ? `<span style="color:#4ade80">used ${k}</span>` : `<span style="color:#facc15" title="Fewer plays than the Local plays option (${localCount()}): the average is rougher">used ${k}</span>`}</td></tr>`; }).join('')}
           </tbody></table></details>`;
       const cmpTable = `
         <div class="qs-tablewrap" style="margin-top:8px; max-width:${partial ? 640 : 520}px;"><table>
@@ -714,7 +734,7 @@ export const mount = (meta, host) => {
           <tbody>${cmpRows.map(x => `<tr><td>${SKILL_NAMES[x.sk]}</td><td class="n qs-dim">${fmt(x.sim)}</td><td class="n">${fmt(x.matched)}</td>${partial ? `<td class="n qs-dim">${fmt(x.same)}</td>` : ''}${realCell(x)}</tr>`).join('')}
             <tr style="border-top:1px solid #2b2b3a;"><td><b>Total</b></td><td class="n qs-dim">${fmt(total.sim)}</td><td class="n"><b>${fmt(total.matched)}</b></td>${partial ? `<td class="n qs-dim">${fmt(total.same)}</td>` : ''}${realCell(total, true)}</tr></tbody>
         </table></div>
-        <div class="qs-dim" style="margin-top:4px; max-width:640px;">XP per hour over the forecast. ${liveNote} · ${localLine}${mapsEnough && cmpRows.some(x => ROUGH_REAL.includes(x.sk)) ? ' *Rough: changes with your Tries.' : ''}</div>
+        <div class="qs-dim" style="margin-top:4px; max-width:640px;">${liveNote} · ${localLine}${mapsEnough && cmpRows.some(x => ROUGH_REAL.includes(x.sk)) ? ' *Rough: depends on Tries.' : ''}</div>
         ${mapList}`;
       // what the genetics add to each skill, and the XP that comes from it
       const geneRows = SKILLS.filter(sk => genetics[sk]).map(sk => {
@@ -810,10 +830,11 @@ export const mount = (meta, host) => {
       const loopSec = r.loopSec || 0;
       const marks = [6, 12, 24].filter(h => h < ctx.hours - 1e-6);
       const MAP_COLORS = SETTINGS.colors.maps;
-      const skillRows = SKILLS.map((sk) => {
-        const L0 = Math.floor(num(row0[sk])), x0 = num(row0[`${sk}XP`]);
+      /** A row of the table: `sk` (a skill, or 'overall'), from level L0 with x0 XP into it, to the goal level
+       *  `need` (prestige, or rebirth for overall), earning `gainOf(play)` a play. */
+      const progressRow = (sk, L0, x0, need, gainOf) => {
         const start = levelOf(L0, x0);
-        const need = 100 + num(row0[`${sk}Prestige`]);
+        const overall = sk === 'overall';
         const cost = xpForLevel(L0);
         // XP from here to the prestige level (0 when there already)
         let toPrestige = 0;
@@ -828,6 +849,10 @@ export const mount = (meta, host) => {
             const base = start < 50 ? 0 : 50, step = start < 50 ? 20 : 10;
             for (let m = base; m < 100; m += step) out.push(m);
             out.push(100);
+          } else if (overall) {
+            // overall levels come slowly: a level a piece, five at a time (100-105, 105-110, 110-115, ...)
+            const base = 100 + Math.floor((start - 100) / 5) * 5;
+            for (let m = base; m <= base + 5; m++) out.push(m);
           } else {
             const base = start >= 105 ? 105 : 100, span = need - base, step = span <= 5 ? 1 : Math.ceil(span / 5);
             for (let m = base; m < need; m += step) out.push(m);
@@ -842,7 +867,7 @@ export const mount = (meta, host) => {
         let mi = 0;
         for (const p of r.plays) {
           while (mi < marks.length && p.end > marks[mi] * 3600 + 1e-6) { const g = gainLevels(L0, x0, cum); atMark.push(levelOf(g.level, g.xp)); mi++; }
-          const gain = xpOf(p, sk);
+          const gain = gainOf(p);
           cum += gain;
           const id = queue.entries[p.entry].beatmapId;
           byMap.set(id, (byMap.get(id) || 0) + gain);
@@ -854,13 +879,18 @@ export const mount = (meta, host) => {
         while (mi < marks.length) { const g = gainLevels(L0, x0, cum); atMark.push(levelOf(g.level, g.xp)); mi++; }
         const gEnd = gainLevels(L0, x0, cum);
         const end = levelOf(gEnd.level, gEnd.xp);
-        const perH = perHour(p => xpOf(p, sk));
+        const perH = perHour(gainOf);
         // past the look-ahead: the same pace, kept up
         const later = (xpLeft) => (perH > 0 ? spanSec + Math.max(0, xpLeft - cum) / perH * 3600 : Infinity);
         const nextSec = nextAt ?? later(cost - x0);
         const readySec = readyAt ?? later(toPrestige);
-        return { sk, L0, x0, start, need, cost, toPrestige, cum, readyAt, nextSec, readySec, end, perH, atMark, byMap, barMarks, markAt };
-      });
+        return { sk, overall, L0, x0, start, need, cost, toPrestige, cum, readyAt, nextSec, readySec, end, perH, atMark, byMap, barMarks, markAt };
+      };
+      const skillRows = SKILLS.map(sk => progressRow(sk, Math.floor(num(row0[sk])), num(row0[`${sk}XP`]), 100 + num(row0[`${sk}Prestige`]), p => xpOf(p, sk)));
+      // the overall level, as rebirth counts it: every skill's lifetime XP together. Rebirth at 110, 10 more a generation.
+      const lifetime = SKILLS.reduce((t, sk) => t + num(row0[`${sk}LifetimeXp`]), 0);
+      const overallNow = gainLevels(0, 0, lifetime);
+      const overallRow = lifetime > 0 ? progressRow('overall', overallNow.level, overallNow.xp, 110 + ((num(row0.generation) || 1) - 1) * 10, totalOf) : null;
       /** A long stretch: up to a day as 8H 05M, past it as ~2D 20H (it assumes the queue keeps going). */
       const longDur = (sec) => {
         if (!isFinite(sec)) return null;
@@ -914,21 +944,21 @@ export const mount = (meta, host) => {
             <span class="qs-dim">${TEXT.levels.now}</span><span>${x.start.toFixed(2)}</span>
             ${marks.map((h, k) => `<span class="qs-dim">${tx(TEXT.levels.after, { time: dur(h * 3600) })}</span><span>${x.atMark[k].toFixed(2)}</span>`).join('')}
             <span class="qs-dim">${tx(TEXT.levels.after, { time: dur(spanSec) })}</span><span>${x.end.toFixed(2)}</span>
-            <span class="qs-dim">${TEXT.levels.prestige}</span><span title="${x.toPrestige ? tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) }) : ''}">${prestigeText(x)}</span></div></div>
+            <span class="qs-dim">${x.overall ? TEXT.levels.rebirth : TEXT.levels.prestige}</span><span title="${x.toPrestige ? tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) }) : ''}">${prestigeText(x)}</span></div></div>
           <div><div class="qs-lv-dh">${TEXT.levels.xpTitle}</div><div class="qs-lv-kv">
-            <span class="qs-dim">${TEXT.levels.perHour}</span><span>${x.perH > 0 ? `${fmt(x.perH)} <span class="qs-faint">${tx(TEXT.levels.queueShare, { pct: shareOf(x) })}</span>` : '–'}</span>
+            <span class="qs-dim">${TEXT.levels.perHour}</span><span>${x.perH > 0 ? `${fmt(x.perH)}${x.overall ? '' : ` <span class="qs-faint">${tx(TEXT.levels.queueShare, { pct: shareOf(x) })}</span>`}` : '–'}</span>
             <span class="qs-dim">${TEXT.levels.perPlay}</span><span>${plays ? fmt(x.cum / plays) : '–'}</span>
             ${loopSec ? `<span class="qs-dim">${TEXT.levels.perLoop}</span><span>${fmt(x.perH * loopSec / 3600)}</span>` : ''}
             <span class="qs-dim">${tx(TEXT.levels.within, { time: dur(spanSec) })}</span><span>${fmt(x.cum)}</span>
-            <span class="qs-dim">${TEXT.levels.toPrestige}</span><span>${x.toPrestige ? fmt(x.toPrestige) : '–'}</span></div></div>
+            <span class="qs-dim">${x.overall ? TEXT.levels.toRebirth : TEXT.levels.toPrestige}</span><span>${x.toPrestige ? fmt(x.toPrestige) : '–'}</span></div></div>
         </div></td></tr>`;
       };
-      const rowsHtml = skillRows.map((x) => {
+      const rowsHtml = (overallRow ? [overallRow, ...skillRows] : skillRows).map((x) => {
         const open = levelsOpen.has(x.sk);
-        return `<tr class="qs-lv-row${open ? ' open' : ''}" data-skill="${x.sk}">
-          <td class="qs-lv-skill"><span class="qs-lv-caret">${open ? '▾' : '▸'}</span>${SKILL_NAMES[x.sk]}<span class="qs-sub">Lv ${x.start.toFixed(2)}</span></td>
-          <td class="n qs-lv-xph">${x.perH > 0 ? `<b>${fmt(x.perH)}</b><span class="qs-faint"> ${shareOf(x)}%</span>` : '<span class="qs-faint">–</span>'}</td>
-          <td class="n qs-lv-pres" title="${x.toPrestige ? tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) }) : ''}">${prestigeText(x)}</td>
+        return `<tr class="qs-lv-row${open ? ' open' : ''}${x.overall ? ' qs-lv-overall' : ''}" data-skill="${x.sk}">
+          <td class="qs-lv-skill"><span class="qs-lv-caret">${open ? '▾' : '▸'}</span>${x.overall ? TEXT.levels.overall : SKILL_NAMES[x.sk]}<span class="qs-sub">Lv ${x.start.toFixed(2)}</span></td>
+          <td class="n qs-lv-xph">${x.perH > 0 ? `<b>${fmt(x.perH)}</b>${x.overall ? '' : `<span class="qs-faint"> ${shareOf(x)}%</span>`}` : '<span class="qs-faint">–</span>'}</td>
+          <td class="n qs-lv-pres" title="${x.overall ? tx(TEXT.levels.rebirthAt, { n: x.need }) : ''}${x.toPrestige ? `${x.overall ? ': ' : ''}${tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) })}` : ''}">${x.overall ? `<span class="qs-faint">${TEXT.levels.rebirth} </span>` : ''}${prestigeText(x)}</td>
           <td class="qs-lv-barcell">${levelsBar(x)}</td>
         </tr>${open ? detailRow(x) : ''}`;
       }).join('');
@@ -940,7 +970,7 @@ export const mount = (meta, host) => {
           <thead><tr><th>${TEXT.levels.skill}</th><th class="n">${TEXT.levels.xph}</th><th class="n">${TEXT.levels.prestige}</th><th style="padding-left:16px;">${TEXT.levels.bar}</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
-        <div class="qs-legend" style="margin-top:6px;"><span><i class="qs-sw" style="background:var(--qs-now);"></i>${TEXT.levels.legendNow}</span><span><i class="qs-sw" style="background:var(--qs-now); opacity:.45;"></i>${TEXT.levels.legendProgress}</span><span><i class="qs-sw qs-sw-complete"></i>${TEXT.levels.legendComplete}</span><span><i class="qs-sw qs-sw-shift"></i>${TEXT.levels.legendPrestige}</span></div>
+        <div class="qs-legend" style="margin-top:6px;"><span><i class="qs-sw" style="background:var(--qs-now);"></i>${TEXT.levels.legendNow}</span><span><i class="qs-sw" style="background:var(--qs-now); opacity:.45;"></i>${TEXT.levels.legendProgress}</span><span class="qs-lg-complete"><i class="qs-sw qs-sw-complete"></i>${TEXT.levels.legendComplete}</span><span><i class="qs-sw qs-sw-shift"></i>${TEXT.levels.legendPrestige}</span></div>
       </div>`;
     }
 
@@ -1251,6 +1281,7 @@ export const mount = (meta, host) => {
 export const unmount = () => {
   scanToken++;
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
   saveCache();
   if (keyListener) {
     window.removeEventListener('keydown', keyListener, true);
