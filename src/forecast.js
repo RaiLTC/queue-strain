@@ -202,8 +202,11 @@ export async function localPlaysOf(row, queue, rate, count = SETTINGS.localPlays
       rows = await gameRows('SELECT x.playedAt AS playedAt, x.gains AS gains, s.rate AS rate, s.mods AS mods FROM score_xp x LEFT JOIN score s ON s.id = x.scoreId WHERE x.characterId = ? AND x.beatmapId = ? AND x.playedAt >= ? ORDER BY x.playedAt DESC LIMIT ?', [row.id, entry.beatmapId, since, 5000]);
     } catch (_) { rows = null; }
     const queueRate = entry.lockedRate ?? rate;
-    for (const x of (rows || []).filter(v => Math.abs((num(v.rate) || 1) - queueRate) < 0.001).slice(0, count)) {
-      out.push({ beatmapId: entry.beatmapId, rate: num(x.rate) || 1, playedAt: num(x.playedAt), real: parseGains(x.gains) });
+    const atRate = (rows || []).filter(v => Math.abs((num(v.rate) || 1) - queueRate) < 0.001);
+    // the map's plays at this rate in the last 24 hours, shown next to how many the estimate uses
+    const day = atRate.filter(v => num(v.playedAt) >= Date.now() - DAY_MS).length;
+    for (const x of atRate.slice(0, count)) {
+      out.push({ beatmapId: entry.beatmapId, rate: num(x.rate) || 1, playedAt: num(x.playedAt), real: parseGains(x.gains), day });
     }
   }
   return out;

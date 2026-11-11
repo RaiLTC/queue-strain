@@ -659,7 +659,7 @@ export const mount = (meta, host) => {
       for (const d of r.local || (r.calib && r.calib.detail) || []) {
         const e = queueMaps.find(x => x.beatmapId === d.beatmapId);
         if (!e || Math.abs(num(d.rate) - rateOfEntry(e)) > 0.001) continue;
-        const a = realAvg[d.beatmapId] || (realAvg[d.beatmapId] = { n: 0, xp: {} });
+        const a = realAvg[d.beatmapId] || (realAvg[d.beatmapId] = { n: 0, xp: {}, day: d.day });
         a.n++;
         for (const sk of SKILLS) a.xp[sk] = (a.xp[sk] || 0) + num(d.real[sk]);
       }
@@ -700,8 +700,9 @@ export const mount = (meta, host) => {
       const partial = mapsEnough > 0 && !allMaps;
       const liveNote = `<span style="color:#4ade80;" title="The local estimate is read again whenever a new play is saved, checked every 2 seconds while this tab is open.">● Live</span>${r.localAt ? ` <span class="qs-dim">updated ${new Date(r.localAt).toLocaleTimeString()} after a new play</span>` : ''}`;
       const mapList = `<details class="qs-local-list"${localOpen ? ' open' : ''} style="margin-top:4px;"><summary class="qs-dim" style="cursor:pointer;">Local plays per map</summary>
-          <table style="margin-top:4px;"><thead><tr><th>Map</th><th class="n">Rate</th><th class="n" title="Your newest plays of this map at the queue's rate, up to ${localCount()}">Plays</th><th>Local estimate</th></tr></thead><tbody>
-          ${queueMaps.map(e => { const k = playsOfMap(e.beatmapId); return `<tr><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${rateOfEntry(e)}×</td><td class="n">${k || '<span class="qs-dim">0</span>'}</td><td>${k ? '<span style="color:#4ade80">used</span>' : '<span style="color:#f87171">Not played yet</span>'}</td></tr>`; }).join('')}
+          <table style="margin-top:4px;"><thead><tr><th>Map</th><th class="n">Rate</th><th class="n" title="Your plays of this map at the queue's rate in the last 24 hours.">Plays</th><th title="How many of your newest plays of this map at the queue's rate the estimate averages: up to ${localCount()} (the Local plays option), from any time.">Local estimate</th></tr></thead><tbody>
+          ${queueMaps.map(e => { const k = playsOfMap(e.beatmapId), day = realAvg[e.beatmapId] && realAvg[e.beatmapId].day; const dayCell = day ? day : day === 0 || !k ? '<span class="qs-dim">0</span>' : '<span class="qs-dim">–</span>';
+            return `<tr><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${rateOfEntry(e)}×</td><td class="n">${dayCell}</td><td>${k ? `<span style="color:#4ade80">used ${k}</span>` : '<span style="color:#f87171">Not played yet</span>'}</td></tr>`; }).join('')}
           </tbody></table></details>`;
       const cmpTable = `
         <div class="qs-tablewrap" style="margin-top:8px; max-width:${partial ? 640 : 520}px;"><table>
