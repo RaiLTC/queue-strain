@@ -5,11 +5,15 @@ import { cached, forecast, localPlaysOf, modsText, parseGains, saveCache, svCurv
 import { MINDBLOCK, SKILLS, diagLog, gameRows, geneticsFor, logProblem, movedOn, num, queueKey, readQueue, setting } from '../game.js';
 import { BAR_ZONES, STAGES, STRAIN_CAP, XP_CUT, barKnots, barOf, gainLevels, levelOf, stageOf, warmup, xpForLevel } from '../rules/fatigue.js';
 import { fatigueGenesOf } from '../rules/genes.js';
-import { LOG_READ_KEY, MATCH_HELP, NOTICE_READ_KEY, SKILL_NAMES, SKILL_SHORT, STAGE_COLOR, TABS, arrows, barHtml, changelogHtml, clock, dur, esc, fmt, graphHtml, logId, matchColor, matchText, minText, noticeHtml, noticeId, shortTime } from './parts.js';
+import { LOG_READ_KEY, MATCH_HELP, NOTICE_READ_KEY, SKILL_NAMES, SKILL_SHORT, STAGE_COLOR, TABS, arrows, barHtml, changelogHtml, clock, dur, durH, durWords, esc, fmt, graphHtml, logId, matchColor, matchText, minText, noticeHtml, noticeId, shortTime, unitsHtml, wireSlider } from './parts.js';
 import { CSS } from './style.js';
 
 export let root = null;
 export let keyListener = null;
+/** Closes the window on a click outside it. */
+export let outsideListener = null;
+/** Lets clicks through the window while the mods menu is up in Edit Queue. */
+export let moveListener = null;
 export let styleEl = null;
 /** Bumped to stop a scan that is running. */
 export let scanToken = 0;
@@ -37,7 +41,7 @@ export const mount = (meta, host) => {
         <div class="qs-card">
           <div class="qs-start" id="qs-start-hint">${TEXT.options.scanToStart}</div>
           <div class="qs-row">
-            <span class="qs-dim">${TEXT.options.lookAhead}</span><input id="qs-hours" type="number" min="0.5" max="24" step="0.5" value="${SETTINGS.lookAheadHours}"><span class="qs-dim">${TEXT.options.hours}</span>
+            <span class="qs-dim">${TEXT.options.lookAhead}</span><input id="qs-hours" type="number" min="1" max="24" step="1" inputmode="numeric" value="${SETTINGS.lookAheadHours}"><span class="qs-dim">${TEXT.options.hours}</span>
             <span class="qs-dim" style="margin-left:8px;" title="${esc(TEXT.options.startAtTip)}">${TEXT.options.startAt}</span><input id="qs-start" type="number" min="0" max="420" step="1" placeholder="now"><span class="qs-dim">${TEXT.options.minOfStrain}</span>
             <button class="qs-btn" id="qs-scan" style="margin-left:auto;">${TEXT.options.scan}</button>
           </div>
@@ -48,6 +52,17 @@ export const mount = (meta, host) => {
             <label class="qs-dim" style="display:flex; align-items:center; gap:4px; margin-left:8px;" title="${esc(tx(TEXT.options.rescanTip, { sec: SETTINGS.rescanWaitSec.maps, min: SETTINGS.quickUpdateMaxMin }))}"><input id="qs-auto" type="checkbox"${SETTINGS.rescanOnQueueChange ? ' checked' : ''} style="margin:0;"> ${TEXT.options.rescan}</label>
             <span class="qs-dim" style="margin-left:auto;" title="${esc(TEXT.options.memoryPlaysTip)}">${TEXT.options.memoryPlays}</span><input id="qs-memplays-top" type="number" min="1" max="40" step="1" value="${SETTINGS.memoryPlays}" style="width:44px;">
           </div>
+          <details class="qs-group" id="qs-win-group"><summary>${TEXT.options.windowGroup}</summary>
+            <div class="qs-row">
+              <label class="qs-dim" style="display:flex; align-items:center; gap:4px;" title="${esc(TEXT.options.fadeTip)}"><input id="qs-fade" type="checkbox" style="margin:0;"> ${TEXT.options.fade}</label>
+              <input id="qs-fade-amt" type="range" min="10" max="90" step="10" style="width:90px; accent-color:#9ca3af;" title="${esc(TEXT.options.fadeTip)}"><span id="qs-fade-val" class="qs-dim" style="min-width:30px;"></span>
+              <span style="display:inline-flex; align-items:center; gap:6px; margin-left:8px;"><span class="qs-dim" title="${esc(TEXT.options.clickOutsideTip)}">${TEXT.options.clickOutside}</span>
+              <select id="qs-outside" style="width:auto;" title="${esc(TEXT.options.clickOutsideTip)}"><option value="close">${TEXT.options.outsideClose}</option><option value="through">${TEXT.options.outsideThrough}</option><option value="stay">${TEXT.options.outsideStay}</option></select></span>
+              <span style="display:inline-flex; align-items:center; gap:6px; margin-left:8px;"><span class="qs-dim" title="${esc(TEXT.options.escEditingTip)}">${TEXT.options.escEditing}</span>
+              <select id="qs-esc-edit" style="width:auto;" title="${esc(TEXT.options.escEditingTip)}"><option value="addon">${TEXT.options.escAddon}</option><option value="both">${TEXT.options.escBoth}</option></select></span>
+              <label class="qs-dim" style="display:flex; align-items:center; gap:4px; margin-left:8px;" title="${esc(TEXT.options.modsPassTip)}"><input id="qs-modspass" type="checkbox" style="margin:0;"> ${TEXT.options.modsPass}</label>
+            </div>
+          </details>
           <div id="qs-status" class="qs-dim" style="margin-top:6px;"></div>
         </div>
       </div>
@@ -59,6 +74,8 @@ export const mount = (meta, host) => {
   const nowEl = $('#qs-now'), outEl = $('#qs-out'), statusEl = $('#qs-status'), scanBtn = $('#qs-scan');
   /** The status line under the buttons, with what hovering it explains (nothing by default). */
   const setStatus = (text, tip = '') => { statusEl.textContent = text; statusEl.title = tip; };
+  /** The look-ahead as whole hours from 1 to 24 (an old saved 6.5 becomes 7). */
+  const wholeHours = (v) => { const n = parseFloat(v); return Math.min(24, Math.max(1, Math.round(Number.isFinite(n) ? n : SETTINGS.lookAheadHours))); };
   const hoursInput = $('#qs-hours'), startInput = $('#qs-start'), runsInput = $('#qs-runs'), memTopInput = $('#qs-memplays-top'), autoBox = $('#qs-auto'), animBox = $('#qs-anim'), localInput = $('#qs-local');
   /** How many of the next plays of each Speed Jam / Memory map to show: set in that tab, 12 at first. */
   let memPlays = SETTINGS.memoryPlays;
@@ -72,7 +89,7 @@ export const mount = (meta, host) => {
   let debugMap = 0;
   try {
     const saved = JSON.parse(localStorage.getItem('queue-strain:prefs') || '{}');
-    if (saved.hours) hoursInput.value = saved.hours;
+    if (saved.hours) hoursInput.value = wholeHours(saved.hours);
     autoBox.checked = saved.autoRescan ?? SETTINGS.rescanOnQueueChange;
     animBox.checked = saved.animations ?? SETTINGS.animations;
     if (saved.localPlays) localInput.value = String(Math.min(50, Math.max(1, Math.round(saved.localPlays))));
@@ -81,10 +98,41 @@ export const mount = (meta, host) => {
     if (saved.memPlays) memPlays = Math.min(40, Math.max(1, Math.round(saved.memPlays)));
     memTopInput.value = String(memPlays);
   } catch (_) {}
-  const savePrefs = () => {
-    try { localStorage.setItem('queue-strain:prefs', JSON.stringify({ hours: parseFloat(hoursInput.value) || 6, runsPerPlay2: parseInt(runsInput.value, 10) || SETTINGS.runsPerPlay, autoRescan: autoBox.checked, animations: animBox.checked, localPlays: localCount(), memPlays, tab: activeTab })); } catch (_) {}
+  // the Window group: fade while the mouse is away, and what a click outside does
+  const winGroup = $('#qs-win-group'), fadeBox = $('#qs-fade'), fadeAmt = $('#qs-fade-amt'), fadeVal = $('#qs-fade-val'), outsideSel = $('#qs-outside'), modsBox = $('#qs-modspass'), escSel = $('#qs-esc-edit');
+  fadeBox.checked = SETTINGS.fadeAway; fadeAmt.value = String(SETTINGS.fadeAmount); outsideSel.value = SETTINGS.clickOutside; modsBox.checked = SETTINGS.modsPassThrough; escSel.value = SETTINGS.escEditing;
+  try {
+    const saved = JSON.parse(localStorage.getItem('queue-strain:prefs') || '{}');
+    if (['addon', 'both'].includes(saved.escEditing)) escSel.value = saved.escEditing;
+    if (saved.modsPassThrough !== undefined) modsBox.checked = !!saved.modsPassThrough;
+    if (saved.fade !== undefined) fadeBox.checked = !!saved.fade;
+    if (saved.fadeAmount) fadeAmt.value = String(Math.min(90, Math.max(10, Math.round(saved.fadeAmount / 10) * 10)));
+    if (['close', 'through', 'stay'].includes(saved.clickOutside)) outsideSel.value = saved.clickOutside;
+    if (saved.windowGroupOpen) winGroup.open = true;
+  } catch (_) {}
+  let mouseIn = true;
+  /** See-through while the mouse is away (when that's on), solid otherwise. */
+  const applyFade = () => {
+    fadeVal.textContent = `${fadeAmt.value}%`;
+    fadeAmt.disabled = !fadeBox.checked;
+    root.style.opacity = fadeBox.checked && !mouseIn ? String(1 - Number(fadeAmt.value) / 100) : '';
   };
-  hoursInput.addEventListener('change', savePrefs);
+  root.addEventListener('mouseenter', () => { mouseIn = true; applyFade(); });
+  root.addEventListener('mouseleave', () => { mouseIn = false; applyFade(); });
+  const savePrefs = () => {
+    try { localStorage.setItem('queue-strain:prefs', JSON.stringify({ hours: wholeHours(hoursInput.value), runsPerPlay2: parseInt(runsInput.value, 10) || SETTINGS.runsPerPlay, autoRescan: autoBox.checked, animations: animBox.checked, localPlays: localCount(), memPlays, tab: activeTab, fade: fadeBox.checked, fadeAmount: Number(fadeAmt.value), clickOutside: outsideSel.value, modsPassThrough: modsBox.checked, escEditing: escSel.value, windowGroupOpen: winGroup.open })); } catch (_) {}
+  };
+  modsBox.addEventListener('change', savePrefs);
+  escSel.addEventListener('change', savePrefs);
+  fadeBox.addEventListener('change', () => { applyFade(); savePrefs(); });
+  fadeAmt.addEventListener('input', applyFade);
+  fadeAmt.addEventListener('change', savePrefs);
+  outsideSel.addEventListener('change', savePrefs);
+  winGroup.addEventListener('toggle', () => { savePrefs(); centerVertically(); });
+  applyFade();
+  // look-ahead: whole hours from 1 to 24, digits only (no dot, comma, minus or exponent)
+  hoursInput.addEventListener('keydown', (ev) => { if (['.', ',', '-', '+', 'e', 'E'].includes(ev.key)) ev.preventDefault(); });
+  hoursInput.addEventListener('change', () => { hoursInput.value = wholeHours(hoursInput.value); savePrefs(); });
   /** The last result, drawn again when a choice changes: no new scan, no calls. */
   let lastResult = null;
   /** Which Speed Jam / Memory map the tab shows: one at a time, paged with ‹ and ›. */
@@ -145,7 +193,7 @@ export const mount = (meta, host) => {
     return (maps(then) === maps(now) ? SETTINGS.rescanWaitSec.repeats : SETTINGS.rescanWaitSec.maps) * 1000;
   };
   /** The queue is checked every SETTINGS.queueCheckMs, only while the window is open. */
-  const startQueueWatch = () => { if (!queueTimer) queueTimer = setInterval(watchQueue, SETTINGS.queueCheckMs); };
+  const startQueueWatch = () => { if (!queueTimer) queueTimer = setInterval(() => { fitAroundQueue(); watchQueue(); }, SETTINGS.queueCheckMs); };
   const stopQueueWatch = () => { if (queueTimer) { clearInterval(queueTimer); queueTimer = null; } };
   const watchQueue = () => {
     if (!root || !shown() || !scanKey || autoPaused) return;
@@ -229,7 +277,30 @@ export const mount = (meta, host) => {
     const r = root.getBoundingClientRect();
     root.style.top = `${Math.max(0, Math.round((innerHeight - r.height) / 2))}px`;
   };
-  const show = () => { root.style.display = 'flex'; startQueueWatch(); };
+  /** While the game's Edit Queue is open (the dock moves to the left column, without its source line), the window
+   *  moves out of its way to the right and is centred top to bottom. It goes back to where it was when Edit Queue
+   *  closes, unless the player moved it in between. */
+  let beforeEdit = null;
+  const editQueueOpen = () => !document.querySelector('.dock__source') && !!document.querySelector('.dock');
+  const fitAroundQueue = () => {
+    if (!shown()) return;
+    if (editQueueOpen()) {
+      const dock = document.querySelector('.dock').getBoundingClientRect(), r = root.getBoundingClientRect();
+      if (beforeEdit || r.left >= dock.right + 8) return;
+      beforeEdit = { left: root.style.left, top: root.style.top, right: root.style.right };
+      root.style.left = `${Math.max(0, Math.min(Math.round(dock.right + 12), innerWidth - r.width))}px`;
+      root.style.right = 'auto';
+      centerVertically();
+      beforeEdit.placed = { left: root.style.left, top: root.style.top };
+    } else if (beforeEdit) {
+      // put it back only if it is still where it was moved to
+      if (root.style.left === beforeEdit.placed.left && root.style.top === beforeEdit.placed.top) {
+        root.style.left = beforeEdit.left; root.style.top = beforeEdit.top; root.style.right = beforeEdit.right;
+      }
+      beforeEdit = null;
+    }
+  };
+  const show = () => { root.style.display = 'flex'; startQueueWatch(); fitAroundQueue(); };
   /** Whether a scan is running: the button reads Stop while it is. */
   let scanning = false;
   const setScanning = (on) => {
@@ -281,6 +352,8 @@ export const mount = (meta, host) => {
       e.stopPropagation();
       if (shown()) hide(); else show();
     } else if (e.key === 'Escape' && shown()) {
+      // while editing the queue, "close both" lets this Esc go on to the game, which closes Edit Queue
+      if (!consoleEl && escSel.value === 'both' && editQueueOpen()) { hide(); return; }
       e.preventDefault();
       e.stopPropagation();
       if (consoleEl) closeConsole(); else hide();
@@ -288,15 +361,50 @@ export const mount = (meta, host) => {
   };
   window.addEventListener('keydown', keyListener, true);
 
+  // a click outside the window (and its console) closes it; never while Edit Queue is open, since the player is
+  // editing the queue this window follows, nor on the button that opens it or the dock it sits in: the window moves
+  // out of the way instead (fitAroundQueue)
+  const opensEditQueue = (el) => {
+    if (el.closest('.dock, [class*="dock__"]')) return true;
+    const btn = el.closest('button, a, [role="button"]');
+    return !!btn && /edit\s+(the\s+)?queue/i.test(`${btn.textContent} ${btn.getAttribute('title') || ''} ${btn.getAttribute('aria-label') || ''}`);
+  };
+  outsideListener = (e) => {
+    if (!shown() || !(e.target instanceof Element) || editQueueOpen()) return;
+    if (root.contains(e.target) || (consoleEl && consoleEl.contains(e.target))) return;
+    if (opensEditQueue(e.target)) { setTimeout(fitAroundQueue, 150); return; }
+    if (outsideSel.value === 'stay') return;
+    if (outsideSel.value === 'close') {
+      // the game doesn't get this click: stop it, and the release and click that follow it
+      e.preventDefault(); e.stopPropagation();
+      const swallow = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+      for (const type of ['pointerup', 'mouseup', 'click']) window.addEventListener(type, swallow, { capture: true, once: true });
+      setTimeout(() => { for (const type of ['pointerup', 'mouseup', 'click']) window.removeEventListener(type, swallow, { capture: true }); }, 600);
+    }
+    hide();
+  };
+  window.addEventListener('pointerdown', outsideListener, true);
+
+  // while editing the queue with its mods menu (.mod-select) up, clicks go through the window to the game, if that's
+  // on; checked as the mouse moves, so it follows the menu opening and closing right away
+  moveListener = () => {
+    if (!shown()) return;
+    const pass = modsBox.checked && editQueueOpen() && !!document.querySelector('.mod-select');
+    root.style.pointerEvents = pass ? 'none' : '';
+    root.classList.toggle('qs-passing', pass);
+  };
+  window.addEventListener('pointermove', moveListener, true);
+
   const renderNow = (c) => {
     const [name, hint] = STAGES[c.stage];
     nowEl.innerHTML = `
       <div class="qs-h">Strain Status</div>
       <div><b>${name}</b> - ${hint}</div>
-      <div>${minText(c.minutes)} of strain / ${Math.round(c.warm * 100)}% warm / sweet spot from ${Math.round(c.knots[1])} min / <span style="color:#f87171">XP cut at ${Math.round(c.knots[3])} min</span></div>
+      <div>${minText(c.minutes)} of strain / ${Math.round(c.warm * 100)}% warm / sweet spot from ${Math.round(c.knots[1])} minutes / <span style="color:#f87171">XP cut at ${Math.round(c.knots[3])} minutes</span></div>
       <div class="qs-bar-labels"><span style="color:${STAGE_COLOR[c.stage]}">${name}</span>${c.trend ? `<span class="qs-trend" title="Where the next play pushes it">${arrows(c.trend)}</span>` : ''}</div>
       ${barHtml(c.bar, c.ahead)}
       ${c.note ? `<div class="qs-dim">${c.note}</div>` : ''}`;
+    wireSlider(nowEl, c.ahead);
   };
 
   /** While the simulator is busy: until when, and what to say beside the progress. */
@@ -354,7 +462,7 @@ export const mount = (meta, host) => {
       if (!queue.entries.length) throw new Error('The queue is empty.');
       scanKey = queueKey(queue.entries);
 
-      const hours = Math.min(24, Math.max(0.5, parseFloat(hoursInput.value) || SETTINGS.lookAheadHours));
+      const hours = wholeHours(hoursInput.value);
       const ctx = {
         api, row, genes, geneSource, gear, startMinutes, hours, runs: parseInt(runsInput.value, 10) || SETTINGS.runsPerPlay,
         onRetry: (n, of, pause) => { busyUntil = Date.now() + pause; busyNote = tx(TEXT.status.busyNote, { n, of }); setStatus(tx(TEXT.status.busy, { sec: Math.round(pause / 1000), n, of })); },
@@ -560,6 +668,8 @@ export const mount = (meta, host) => {
     root.style.setProperty('--qs-phase', `-${Math.round(performance.now() % 2400)}ms`);
     lastResult = [queue, ctx, now, r];
     const endSec = ctx.hours * 3600;
+    /** The look-ahead as set in the options: "never in 6 hours", not "5 hours and 58 minutes". */
+    const aheadText = `${ctx.hours} hour${ctx.hours === 1 ? '' : 's'}`;
     const medals = r.medals || { ok: false, multiplier: 1 };
     /** A skill's bonus: the medals from the server, or when it couldn't be reached, as learned from the real plays. */
     const genetics = r.genetics || {};
@@ -590,26 +700,26 @@ export const mount = (meta, host) => {
     const nowStage = stageOf(now.bar);
     if (nowStage === 'cold' || nowStage === 'warming') {
       const t = when(b => b >= BAR_ZONES[0]);
-      outlook.push(['Sweet Spot', t !== undefined ? `reached in <b>${dur(t)}</b>` : `<b>not reached</b> in ${dur(ctx.hours * 3600)}: the queue is too light`]);
+      outlook.push(['Sweet Spot', t !== undefined ? `reached in <b>${durWords(t)}</b>` : `<b>not reached</b> in ${aheadText}`]);
     }
     const reach = r.samples.findIndex(s => inPeak(s.bar));
     if (reach >= 0) {
       const leave = r.samples.findIndex((s, i) => i > reach && !inPeak(s.bar));
       outlook.push(['Leaves Sweet Spot', leave >= 0
-        ? `in <b>${dur(r.samples[leave].t)}</b>, ${r.samples[leave].bar >= BAR_ZONES[1] ? 'pushed past it: play easier maps' : 'cooled below it: play harder maps'}`
-        : `<b>never</b> in ${dur(ctx.hours * 3600)}: this queue holds you there`]);
+        ? `<span title="${r.samples[leave].bar >= BAR_ZONES[1] ? 'Pushed past it: easier maps keep you there longer' : 'Cools below it: harder maps keep you there longer'}">in <b>${durWords(r.samples[leave].t)}</b></span>`
+        : `<b>never</b> in ${aheadText}`]);
     }
     const fat = when(b => b >= XP_CUT);
     outlook.push(['<span style="color:#f87171">XP cut</span>', now.minutes >= now.knots[3]
-      ? '<b style="color:#f87171">already</b>: past 300 min of strain'
+      ? '<b style="color:#f87171">already</b>'
       : fat !== undefined
-        ? `<b style="color:#f87171">in ${dur(fat)}</b>, when strain passes 300 min`
-        : `<b>never</b> in ${dur(ctx.hours * 3600)}: strain stays under 300 min`]);
+        ? `<b style="color:#f87171">in ${durWords(fat)}</b>`
+        : `<b>never</b> in ${aheadText}`]);
     if (r.loopSec) {
       const drift = r.loopDrift;
-      outlook.push(['One Loop', `${r.loopPlays} play${r.loopPlays === 1 ? '' : 's'} in ${dur(r.loopSec)}, ${Math.abs(drift) < 0.5 ? 'strain about even' : `${drift > 0 ? '+' : ''}${drift.toFixed(1)} min of strain`} each loop`]);
+      outlook.push(['One Loop', `${r.loopPlays} play${r.loopPlays === 1 ? '' : 's'} in ${durWords(r.loopSec)}, ${Math.abs(drift) < 0.5 ? 'strain about even' : `${drift > 0 ? '+' : ''}${drift.toFixed(1)} minutes of strain`} each loop`]);
     }
-    outlook.push([`After ${dur(endSec)}`, `<b>${STAGES[stageOf(last.bar)][0]}</b>, ${minText(last.minutes)} of strain (bar ${(last.bar * 100).toFixed(0)}%)`]);
+    outlook.push([`After ${aheadText}`, `<b>${STAGES[stageOf(last.bar)][0]}</b>, ${minText(last.minutes)} of strain (bar ${(last.bar * 100).toFixed(0)}%)`]);
     const fails = r.plays.filter(p => !p.passed).length;
     if (fails) outlook.push(['Fails', `<span style="color:#fca5a5">${fails} of ${r.plays.length} plays fail</span>, each still tiring you for the whole map`]);
 
@@ -639,7 +749,7 @@ export const mount = (meta, host) => {
             <thead><tr><th>#</th><th>Map</th><th>Starts</th><th>Strain / Length</th><th></th><th>Bar</th></tr></thead>
             <tbody>${playRows}</tbody>
           </table></div>
-          ${r.plays.length > shownPlays.length ? `<div class="qs-dim" style="margin-top:4px;">${r.plays.length - shownPlays.length} more plays in the next ${dur(ctx.hours * 3600)}.</div>` : ''}
+          ${r.plays.length > shownPlays.length ? `<div class="qs-dim" style="margin-top:4px;">${r.plays.length - shownPlays.length} more plays in the next ${aheadText}.</div>` : ''}
         </div>
       </div>`;
 
@@ -648,11 +758,11 @@ export const mount = (meta, host) => {
     if (hasXp) {
       const lines = [];
       lines.push(['Per hour', `<b>${fmt(perHour(totalOf))}</b> on average`]);
-      lines.push(['Total', `<b>${fmt(r.plays.reduce((t, p) => t + totalOf(p), 0))}</b> in the next ${dur(spanH * 3600)}`]);
+      lines.push(['Total', `<b>${fmt(r.plays.reduce((t, p) => t + totalOf(p), 0))}</b> in the next ${aheadText}`]);
       const matched = r.calib ? Object.entries(r.calib.factors) : [];
       const ignored = r.calib ? Object.keys(r.calib.ignored || {}) : [];
       lines.push(['Medals', medals.ok
-        ? (medals.guest ? 'none: a guest character holds no medals' : `<b>×${medals.multiplier.toFixed(3)}</b> on all XP, from your ${medals.held} medal${medals.held === 1 ? '' : 's'} on the server${medals.unknown ? ` <span class="qs-dim">(${medals.unknown} newer than this add-on, not counted)</span>` : ''}`)
+        ? (medals.guest ? 'none: a guest character holds no medals' : `<b>×${medals.multiplier.toFixed(3)}</b> · ${medals.held} medal${medals.held === 1 ? '' : 's'}${medals.unknown ? ` <span class="qs-dim" title="Newer than this add-on, so not counted">(${medals.unknown} not counted)</span>` : ''}`)
         : matched.length
           ? `<span style="color:#fca5a5">couldn't reach the server</span>, so learned from your last ${r.calib.plays} play${r.calib.plays === 1 ? '' : 's'} of these maps: ${matched.map(([sk, f]) => `${SKILL_NAMES[sk]} ×${f.toFixed(2)}`).join(', ')}${ignored.length ? `. <span style="color:#fca5a5">Not applied, as they look wrong: ${ignored.map(sk => `${SKILL_NAMES[sk]} ×${r.calib.ignored[sk].toFixed(2)}`).join(', ')}</span> (see Debug)` : ''}`
           : '<span style="color:#fca5a5">couldn\'t reach the server and no recent plays of these maps, so these are the simulator\'s numbers before your medals: likely too low</span>']);
@@ -660,13 +770,14 @@ export const mount = (meta, host) => {
       if (blocked.length) {
         const avg = blocked.reduce((sum, p) => sum + num(p.block ?? 1), 0) / blocked.length;
         const low = Math.min(...blocked.map(p => num(p.block ?? 1)));
-        const skillsHit = SKILLS.filter(sk => MINDBLOCK.has(sk) && blocked.some(p => num(p.xp[sk]) > 0)).map(sk => SKILL_NAMES[sk]).join(', ');
+        const skillsHit = SKILLS.filter(sk => MINDBLOCK.has(sk) && blocked.some(p => num(p.xp[sk]) > 0)).map(sk => SKILL_NAMES[sk]);
+        const skillsList = skillsHit.length > 1 ? `${skillsHit.slice(0, -1).join(', ')} and ${skillsHit[skillsHit.length - 1]}` : skillsHit[0];
         lines.push([`<span style="cursor:help; border-bottom:1px dotted currentColor;" title="The server cuts XP on maps you played a lot lately: it counts how many of your last 50 plays (within a day) were the same map. Speed, Stamina, Jack Speed, Coordination and Memory are never cut.">Mindblock</span>`,
-          avg > 0.995 ? 'none: these maps are few of your recent plays' : `<b>×${avg.toFixed(2)}</b> on average${low < avg - 0.01 ? `, down to ×${low.toFixed(2)}` : ''}, on ${skillsHit}`]);
+          avg > 0.995 ? 'none: these maps are few of your recent plays' : `<b>×${avg.toFixed(2)}</b> on average${low < avg - 0.01 ? `, down to ×${low.toFixed(2)}` : ''}, on ${skillsList}`]);
       }
       if (r.loopSec) {
         const loopPlays = r.plays.slice(r.loopStart, r.loopStart + r.loopPlays);
-        lines.push(['One Loop', `<b>${fmt(loopPlays.reduce((sum, p) => sum + totalOf(p), 0))}</b> in ${dur(r.loopSec)}`]);
+        lines.push(['One Loop', `<b>${fmt(loopPlays.reduce((sum, p) => sum + totalOf(p), 0))}</b> in ${durWords(r.loopSec)}`]);
       }
       const beforeCut = r.plays.filter(p => p.before < now.knots[3]), afterCut = r.plays.filter(p => p.before >= now.knots[3]);
       if (beforeCut.length && afterCut.length) {
@@ -736,7 +847,7 @@ export const mount = (meta, host) => {
           <thead><tr><th>Skill XP</th>
             <th class="n" title="The simulator's own numbers, before your genetics, medals and other bonuses.">Simulator</th>
             <th class="n" title="The simulator's XP with mindblock taken off, then your medals and genetics added, the way the server counts it. This is what the rest of the add-on uses.">Simulator + Bonuses</th>
-            <th class="n" title="What each map actually gave you per play, on average over your newest ${localCount()} plays of it at the queue's rate and mods in the last 24 hours (the Local plays option). A map you haven't played in that time is left out. Those plays had their own mindblock and strain, so expect some difference.${partial ? ` Covers the ${mapsEnough} played map${mapsEnough === 1 ? '' : 's'} only: hover a number to compare it with the same maps' Simulator + Bonuses.` : ''}">Local Estimation</th></tr></thead>
+            <th class="n" title="Based on your real plays, not simulated. With few or no plays, it can be inaccurate.">Local Estimation</th></tr></thead>
           <tbody>${cmpRows.map(x => `<tr><td>${SKILL_NAMES[x.sk]}</td><td class="n qs-dim">${fmt(x.sim)}</td><td class="n">${fmt(x.matched)}</td>${realCell(x)}</tr>`).join('')}
             <tr style="border-top:1px solid #2b2b3a;"><td><b>Total</b></td><td class="n qs-dim">${fmt(total.sim)}</td><td class="n"><b>${fmt(total.matched)}</b></td>${realCell(total, true)}</tr></tbody>
         </table></div>
@@ -900,9 +1011,9 @@ export const mount = (meta, host) => {
       /** A long stretch: up to a day as 8H 05M, past it as ~2D 20H (it assumes the queue keeps going). */
       const longDur = (sec) => {
         if (!isFinite(sec)) return null;
-        if (sec < 86400) return sec > spanSec + 1 ? `~${dur(sec)}` : dur(sec);
+        if (sec < 86400) return sec > spanSec + 1 ? `~${durH(sec, true)}` : durH(sec, true);
         const h = Math.round(sec / 3600), d = Math.floor(h / 24), rest = h - d * 24;
-        return `~${d}D${rest ? ` ${rest}H` : ''}`;
+        return `~${unitsHtml(`${d}d${rest ? ` ${rest}h` : ''}`, true)}`;
       };
       /** The bar: one piece between each pair of marks, filled to your level and, fainter, to where this queue takes
        *  you. Under each piece its end mark, with the time if it's reached within the look-ahead. A skill that
@@ -918,18 +1029,24 @@ export const mount = (meta, host) => {
           const last = k === n - 1;
           const at = x.markAt[b2];
           const goal = last && x.start >= 100 && b2 === x.need;
-          const label = `${b2}${at !== undefined ? ` · ${dur(at)}` : ''}`;
+          const label = `${b2}${at !== undefined ? ` · ${durH(at)}` : ''}`;
           // a piece this queue completes within the look-ahead: its progress shifts to white (pink when it's the prestige)
           const completes = endF >= 1 && nowF < 1;
           cells.push(`<div class="qs-lv-cell"><div class="qs-lv-seg${last && soon ? ' shift' : completes ? ' complete' : ''}">${endF > nowF ? `<i class="gain" style="left:${nowF * 100}%; width:${(endF - nowF) * 100}%"></i>` : ''}<i style="width:${nowF * 100}%"></i></div>
-            <span class="qs-lv-tk${goal ? ' goal' : at !== undefined ? ' time' : ''}">${label}</span></div>`);
+            <span class="qs-lv-tk${last ? '' : ' mid'}${goal ? ' goal' : at !== undefined ? ' time' : ''}">${label}</span></div>`);
         }
         return `<div class="qs-lv-bar"><span class="qs-lv-tk first">${m[0]}</span>${cells.join('')}</div>`;
       };
       const prestigeText = (x) => {
         if (x.readyAt === 0) return `<span class="qs-ready">${TEXT.levels.readyNow}</span>`;
         if (!isFinite(x.readySec)) return '<span class="qs-faint">–</span>';
-        return x.readyAt !== undefined ? `<span class="qs-ready">in ${dur(x.readySec)}</span>` : `<span title="${esc(TEXT.levels.keepPlaying)}">${longDur(x.readySec)}</span>`;
+        return x.readyAt !== undefined ? `<span style="font-weight:600;">in ${durH(x.readySec, true)}</span>` : `<span title="${esc(TEXT.levels.keepPlaying)}">${longDur(x.readySec)}</span>`;
+      };
+      /** The overall rebirth time in words, numbers coloured: "in 3 days and 4 hours". */
+      const wordsDur = (sec) => `in ${durWords(sec, true, true)}`;
+      const overallText = (x) => {
+        if (x.readyAt === 0 || !isFinite(x.readySec)) return prestigeText(x);
+        return x.readyAt !== undefined ? `<span style="font-weight:600;">${wordsDur(x.readySec)}</span>` : `<span title="${esc(TEXT.levels.keepPlaying)}">${wordsDur(x.readySec)}</span>`;
       };
       const shareOf = (x) => (totalPerH > 0 ? Math.round(x.perH / totalPerH * 100) : 0);
       const detailRow = (x) => {
@@ -948,18 +1065,23 @@ export const mount = (meta, host) => {
           <div><div class="qs-lv-dh">${TEXT.levels.mapsTitle}</div>${bar}</div>
           <div><div class="qs-lv-dh">${TEXT.levels.paceTitle}</div><div class="qs-lv-kv">
             <span class="qs-dim">${TEXT.levels.now}</span><span>${x.start.toFixed(2)}</span>
-            ${marks.map((h, k) => `<span class="qs-dim">${tx(TEXT.levels.after, { time: dur(h * 3600) })}</span><span>${x.atMark[k].toFixed(2)}</span>`).join('')}
-            <span class="qs-dim">${tx(TEXT.levels.after, { time: dur(spanSec) })}</span><span>${x.end.toFixed(2)}</span>
+            ${marks.map((h, k) => `<span class="qs-dim">${tx(TEXT.levels.after, { time: durH(h * 3600) })}</span><span>${x.atMark[k].toFixed(2)}</span>`).join('')}
+            <span class="qs-dim">${tx(TEXT.levels.after, { time: durH(spanSec) })}</span><span>${x.end.toFixed(2)}</span>
             <span class="qs-dim">${x.overall ? TEXT.levels.rebirth : TEXT.levels.prestige}</span><span title="${x.toPrestige ? tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) }) : ''}">${prestigeText(x)}</span></div></div>
           <div><div class="qs-lv-dh">${TEXT.levels.xpTitle}</div><div class="qs-lv-kv">
             <span class="qs-dim">${TEXT.levels.perHour}</span><span>${x.perH > 0 ? `${fmt(x.perH)}${x.overall ? '' : ` <span class="qs-faint">${tx(TEXT.levels.queueShare, { pct: shareOf(x) })}</span>`}` : '–'}</span>
             <span class="qs-dim">${TEXT.levels.perPlay}</span><span>${plays ? fmt(x.cum / plays) : '–'}</span>
             ${loopSec ? `<span class="qs-dim">${TEXT.levels.perLoop}</span><span>${fmt(x.perH * loopSec / 3600)}</span>` : ''}
-            <span class="qs-dim">${tx(TEXT.levels.within, { time: dur(spanSec) })}</span><span>${fmt(x.cum)}</span>
+            <span class="qs-dim">${tx(TEXT.levels.within, { time: durH(spanSec) })}</span><span>${fmt(x.cum)}</span>
             <span class="qs-dim">${x.overall ? TEXT.levels.toRebirth : TEXT.levels.toPrestige}</span><span>${x.toPrestige ? fmt(x.toPrestige) : '–'}</span></div></div>
         </div></td></tr>`;
       };
-      const rowsHtml = (overallRow ? [overallRow, ...skillRows] : skillRows).map((x) => {
+      // the overall level sits on its own above the skills: one line, then its bar. It doesn't open.
+      const overallHtml = overallRow ? `<div class="qs-lv-ov">
+          <div class="qs-lv-ovline"><b>${TEXT.levels.overall} Lv ${overallRow.start.toFixed(2)}</b><span class="qs-faint">·</span><span><b>${overallRow.perH > 0 ? fmt(overallRow.perH) : '–'}</b> <span class="qs-dim">${TEXT.levels.xph}</span></span><span class="qs-faint">·</span><span title="${tx(TEXT.levels.rebirthAt, { n: overallRow.need })}${overallRow.toPrestige ? `: ${tx(TEXT.levels.xpToGo, { xp: fmt(overallRow.toPrestige) })}` : ''}"><span class="qs-dim">${TEXT.levels.rebirth}</span> ${overallText(overallRow)}</span></div>
+          ${levelsBar(overallRow)}
+        </div>` : '';
+      const rowsHtml = skillRows.map((x) => {
         const open = levelsOpen.has(x.sk);
         return `<tr class="qs-lv-row${open ? ' open' : ''}${x.overall ? ' qs-lv-overall' : ''}" data-skill="${x.sk}">
           <td class="qs-lv-skill"><span class="qs-lv-caret">${open ? '▾' : '▸'}</span>${x.overall ? TEXT.levels.overall : SKILL_NAMES[x.sk]}<span class="qs-sub">Lv ${x.start.toFixed(2)}</span></td>
@@ -971,6 +1093,7 @@ export const mount = (meta, host) => {
       levelsTab = `
       <div class="qs-card">
         <div class="qs-h">${TEXT.levels.title}</div>
+        ${overallHtml}
         <div class="qs-dim" style="margin-bottom:6px;">${TEXT.levels.intro}</div>
         <table class="qs-lv">
           <thead><tr><th>${TEXT.levels.skill}</th><th class="n">${TEXT.levels.xph}</th><th class="n">${TEXT.levels.prestige}</th><th style="padding-left:16px;">${TEXT.levels.bar}</th></tr></thead>
@@ -997,7 +1120,7 @@ export const mount = (meta, host) => {
         <span>Medals</span><span>${medals.ok ? `×${medals.multiplier.toFixed(4)} (${medals.held} held${medals.unknown ? `, ${medals.unknown} unknown` : ''})` : 'server not reached'}</span>
         <span>Mindblock</span><span>${num(r.recentStart)} plays in the last day counted at the start</span>
         <span>Tries</span><span>${(() => { const ids = Object.keys(r.triesFrom || {}); const n = ids.filter(id => r.triesFrom[id] === 'server').length; return n === ids.length ? 'from the server' : n ? `from the server for ${n} of ${ids.length} maps, the rest from this computer's plays` : 'from this computer\'s plays (the server didn\'t answer)'; })()}</span>
-        <span>Forecast</span><span>${r.plays.length} plays over ${dur(spanH * 3600)}</span>
+        <span>Forecast</span><span>${r.plays.length} plays over ${durH(spanH * 3600)}</span>
       </div></div>`;
     const calibSkills = r.calib ? SKILLS.filter(sk => r.calib.sim && r.calib.sim[sk] > 0) : [];
     const factorShown = (sk) => r.calib.factors[sk] ?? r.calib.ignored[sk];
@@ -1080,7 +1203,7 @@ export const mount = (meta, host) => {
           <div class="qs-dim" style="margin:2px 0 8px;">Id ${id} · ${entry.lockedRate ?? `${ctx.rate} (yours)`}× · repeat ${entry.repeat} · Tries now ${num(r.memory[id]).toFixed(1)}</div>
           ${own.length ? `
           <div class="qs-facts" style="margin-bottom:8px;">
-            <span class="qs-dim">Plays</span><span><b>${own.length}</b> in the next ${dur(spanH * 3600)}</span>
+            <span class="qs-dim">Plays</span><span><b>${own.length}</b> in the next ${durH(spanH * 3600)}</span>
             <span class="qs-dim">XP</span><span><b>${fmt(sum)}</b> in all, <b>${fmt(sum / own.length)}</b> a play on average</span>
             <span class="qs-dim">Over time</span><span>${fmt(firstT)} on its first play, ${fmt(lastT)} on its last (<span style="color:${change >= 0 ? '#4ade80' : '#f87171'}">${change >= 0 ? '+' : ''}${Math.round(change * 100)}%</span>)</span>
             ${ups.length ? `<span class="qs-dim">Level-ups</span><span class="qs-up">${ups.map(u => `${SKILL_NAMES[u.skill]} ${u.level}`).join(', ')}</span>` : ''}
@@ -1100,7 +1223,7 @@ export const mount = (meta, host) => {
                 <td><span class="qs-pill ${p.fresh ? 'new' : 'hit'}">${p.fresh ? 'new' : 'cache'}</span>${p.passed ? '' : ' <span style="color:#fca5a5; font-weight:700;">fail</span>'}${p.ups && p.ups.length ? ` <span class="qs-up">${p.ups.map(u => `${SKILL_SHORT[u.skill]} ${u.level}`).join(', ')} ↑</span>` : ''}</td>
               </tr>`;
             }).join('')}</tbody>
-          </table></div>` : `<div class="qs-dim">Not played within the next ${dur(spanH * 3600)}.</div>`}
+          </table></div>` : `<div class="qs-dim">Not played within the next ${durH(spanH * 3600)}.</div>`}
         </div>`;
     }
     // ---- Diagnostics: a health line per input, and everything as text to paste (no character id or name) ----
@@ -1209,7 +1332,7 @@ export const mount = (meta, host) => {
       ${content}`;
 
     for (const tr of outEl.querySelectorAll('.qs-lv-row')) {
-      tr.onclick = () => { const k = tr.dataset.skill; if (levelsOpen.has(k)) levelsOpen.delete(k); else levelsOpen.add(k); renderResult(...lastResult); };
+      tr.onclick = () => { const k = tr.dataset.skill; if (levelsOpen.has(k)) levelsOpen.delete(k); else levelsOpen.add(k); renderResult(...lastResult); centerVertically(); };
     }
     const localList = outEl.querySelector('.qs-local-list');
     if (localList) localList.addEventListener('toggle', () => { localOpen = localList.open; centerVertically(); });
@@ -1292,6 +1415,14 @@ export const unmount = () => {
   if (keyListener) {
     window.removeEventListener('keydown', keyListener, true);
     keyListener = null;
+  }
+  if (outsideListener) {
+    window.removeEventListener('pointerdown', outsideListener, true);
+    outsideListener = null;
+  }
+  if (moveListener) {
+    window.removeEventListener('pointermove', moveListener, true);
+    moveListener = null;
   }
   if (root) { root.remove(); root = null; }
   if (styleEl) { styleEl.remove(); styleEl = null; }

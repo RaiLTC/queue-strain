@@ -28,6 +28,14 @@ export const CSS = `
 #qs-window .qs-sub { display:block; font-size:10.5px; color:#9ca3af; font-weight:400; }
 #qs-window .qs-faint { color:#6b7280; }
 #qs-window .qs-ready { color:#4ade80; font-weight:600; }
+#qs-window small.qs-u { font-size:.8em; color:#9ca3af; font-weight:400; margin-left:1px; }
+/* Levels: digits coloured by unit (under a minute, minutes, hours, days, months and years) */
+#qs-window .qs-num.hot { font-weight:600; }
+#qs-window .qs-num.u-s { color:#4ade80; }
+#qs-window .qs-num.u-m { color:#facc15; }
+#qs-window .qs-num.u-h { color:#fb923c; }
+#qs-window .qs-num.u-d { color:#f87171; }
+#qs-window .qs-num.u-mo, #qs-window .qs-num.u-y { color:#c084fc; }
 /* the levels bar: a piece per pair of marks, the end mark (and when you reach it) under each */
 #qs-window .qs-lv-bar { position:relative; display:flex; gap:3px; padding-top:3px; min-width:0; }
 #qs-window .qs-lv-cell { flex:1; min-width:0; display:flex; flex-direction:column; }
@@ -40,6 +48,8 @@ export const CSS = `
 #qs-window .qs-lv-tk.time { color:#c7d2fe; }
 #qs-window .qs-lv-tk.goal { color:var(--qs-prestige); }
 #qs-window .qs-lv-tk.first { position:absolute; left:0; top:14px; margin-top:0; }
+/* a mark between two pieces starts under the next piece, the level it begins (the gap is 3px) */
+#qs-window .qs-lv-tk.mid { transform:translateX(calc(100% + 3px)); }
 /* reaching prestige within the look-ahead: the last piece's progress shifts to a dark version of the game's pink */
 #qs-window .qs-lv-seg.shift > i.gain, #qs-window .qs-sw-shift { animation:qs-shift 2.4s ease-in-out infinite; }
 @keyframes qs-shift { 0%, 100% { background:var(--qs-now); opacity:.45; } 50% { background:var(--qs-shift); opacity:.95; } }
@@ -55,7 +65,8 @@ export const CSS = `
 #qs-window.qs-noanim .qs-lv-seg.shift > i.gain { background:var(--qs-shift); opacity:.9; }
 /* without animations, a completed piece keeps the plain progress colour (only the prestige piece stays pink) */
 #qs-window.qs-noanim .qs-lg-complete { display:none; }
-#qs-window .qs-lv-overall > td { border-bottom:1px solid #2b2b3a; }
+#qs-window .qs-lv-ov { padding:4px 8px 16px; margin-bottom:8px; border-bottom:1px solid #2b2b3a; }
+#qs-window .qs-lv-ovline { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; font-size:12px; margin-bottom:2px; font-variant-numeric:tabular-nums; }
 @media (prefers-reduced-motion: reduce) {
   #qs-window *, #qs-window *::before, #qs-window *::after { animation:none !important; transition:none !important; }
   #qs-window .qs-lv-seg.shift > i.gain { background:var(--qs-shift); opacity:.9; }
@@ -159,20 +170,42 @@ export const CSS = `
 #qs-window .qs-card { background:#14141c; border:1px solid #23232f; border-radius:6px; padding:9px 11px; min-width:0; }
 #qs-window .qs-h { font-weight:700; color:#fff; margin-bottom:2px; }
 #qs-window .qs-dim { color:#9ca3af; font-size:11px; }
-#qs-window .qs-bar { position:relative; height:24px; margin:16px 2px 24px; }
+#qs-window .qs-bar { position:relative; height:24px; margin:22px 2px 26px; }
 #qs-window .qs-bar-labels { display:flex; justify-content:flex-end; align-items:baseline; gap:8px; font-weight:700; font-size:14px; margin-top:6px; }
 #qs-window .qs-bar-labels .qs-trend { font-size:13px; letter-spacing:-2px; }
 #qs-window .qs-track { position:absolute; left:0; right:0; top:10px; height:6px; border-radius:3px;
   background:linear-gradient(90deg, #4f9cf5 0%, #6fb8c9 22%, #d9c64b 40%, #e8c147 60%, #f0883e 80%, #b48cff 100%); }
 #qs-window .qs-tick { position:absolute; top:5px; width:2px; height:16px; background:#e5e7eb; border-radius:1px; }
 #qs-window .qs-cut { position:absolute; top:3px; width:3px; height:20px; margin-left:-1.5px; background:#ef4444; border-radius:1px; box-shadow:0 0 4px rgba(239,68,68,.7); }
-#qs-window .qs-cut-label { position:absolute; top:-9px; transform:translateX(-50%); font-size:9px; font-weight:700; color:#f87171; white-space:nowrap; }
-#qs-window .qs-band { position:absolute; top:7px; height:12px; border-radius:6px; background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.28); }
-#qs-window .qs-hour { position:absolute; top:9px; width:8px; height:8px; margin-left:-4px; border-radius:50%; border:1.5px solid rgba(255,255,255,.55); background:rgba(20,20,28,.6); }
-#qs-window .qs-hour-label { position:absolute; top:28px; transform:translateX(-50%); font-size:9px; color:rgba(229,231,235,.6); white-space:nowrap; }
+#qs-window .qs-cut-label { position:absolute; top:-12px; transform:translateX(-50%); font-size:9px; font-weight:700; color:#f87171; white-space:nowrap; }
+/* where the forecast goes: a faint band over its range, and an arrow above the bar from now to where it ends */
+#qs-window .qs-band { position:absolute; top:7px; height:12px; border-radius:6px; background:rgba(255,255,255,.12); }
+#qs-window .qs-arrow { position:absolute; left:0; top:-11px; width:100%; height:10px; overflow:visible; filter:drop-shadow(0 0 1px rgba(0,0,0,.9)); }
+#qs-window .qs-endline { position:absolute; top:-6px; height:32px; width:0; margin-left:-0.5px; border-left:1px dashed rgba(255,255,255,.45); pointer-events:none; }
+/* when the arrow reaches the XP cut it moves up, to make room under it for the XP lost at each hour */
+#qs-window .qs-bar.lossy { margin-top:42px; }
+#qs-window .qs-bar.lossy .qs-arrow { top:-23px; }
+#qs-window .qs-bar.lossy .qs-hour-label { top:-35px; }
+#qs-window .qs-bar.lossy .qs-endline { top:-18px; height:44px; }
+#qs-window .qs-loss-label { position:absolute; top:-12px; transform:translateX(-50%); font-size:9px; font-weight:600; white-space:nowrap; }
+/* the time slider under the strain bar, and the ghost needle it moves */
+#qs-window .qs-slide { display:flex; align-items:center; gap:8px; margin:0 2px 8px; font-size:11px; }
+#qs-window .qs-slide-in { flex:0 1 220px; min-width:80px; accent-color:#9ca3af; height:14px; margin:0; }
+#qs-window .qs-slide-text { margin-left:6px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+#qs-window .qs-at { position:absolute; top:4px; width:3px; height:18px; margin-left:-1.5px; background:rgba(255,255,255,.55); border-radius:2px; box-shadow:0 0 3px #000; z-index:1; pointer-events:none; }
+#qs-window .qs-hour-label { position:absolute; top:-23px; transform:translateX(-50%); font-size:9px; color:rgba(229,231,235,.8); white-space:nowrap; }
+#qs-window .qs-arrow-label { position:absolute; top:30px; transform:translateX(-50%); font-size:10px; color:rgba(229,231,235,.8); white-space:nowrap; }
 #qs-window .qs-needle { position:absolute; top:2px; width:4px; height:22px; margin-left:-2px; background:#fff; border-radius:2px; box-shadow:0 0 4px #000; z-index:1; }
 #qs-window .qs-needle::after { content:''; position:absolute; left:-4px; top:22px; border:6px solid transparent; border-bottom:8px solid #fff; border-top:none; }
 #qs-window .qs-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+/* the Window group in the options: folds open and shut; the fade eases in and out */
+#qs-window .qs-group { margin-top:6px; }
+#qs-window .qs-group > summary { cursor:pointer; color:#9ca3af; font-size:11px; user-select:none; }
+#qs-window .qs-group > summary:hover { color:#e5e7eb; }
+#qs-window .qs-group > .qs-row { margin-top:4px; }
+#qs-window .qs-group select { background:#0f0f15; color:#e5e7eb; border:1px solid #2b2b3a; border-radius:4px; font-size:11px; padding:1px 4px; }
+#qs-window { transition:opacity .2s ease; }
+#qs-window.qs-noanim { transition:none; }
 #qs-window select { background:#1a1a24; border:1px solid #3f3f5a; border-radius:3px; color:#fff; font-size:11px; padding:1px 2px; outline:none; }
 #qs-window .qs-pager { margin-left:6px; display:flex; align-items:center; gap:6px; font-size:11px; color:#e5e7eb; font-weight:600; }
 #qs-window .qs-pager button { width:22px; height:20px; padding:0; background:#2b2b3a; color:#fff; border:1px solid #3f3f5a; border-radius:3px; font-size:14px; line-height:16px; cursor:pointer; }

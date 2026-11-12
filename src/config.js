@@ -11,8 +11,8 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.3.4';
-export const VERSION_ID = '2026-11-11 14H21M';
+export const VERSION = '1.3.50';
+export const VERSION_ID = '2026-11-12 05H27M';
 
 // none / info / urgent
 export const NOTICE = {
@@ -24,7 +24,14 @@ export const NOTICE = {
 
 export const CHANGELOG = {
   id: VERSION_ID,
-  text: `v${VERSION} · 11 Nov 2026\n• Overall level and rebirth in the levels tab\n• Queue changes update almost instantly, without a full scan\n• Local estimate uses your plays from the last 24 hours\n• Shorter, clearer texts\n• Turning off animations also turns off the level up colour\n• Bunch of fixes`,
+  text: `v${VERSION} · 12 Nov 2026
+• Strain bar shows where you're headed, with a time slider
+• XP loss shown past the XP cut
+• Overall level on top, rebirth time in words
+• Clearer times and colours
+• Window fades when not in use and moves aside for Edit Queue
+• Click outside or Esc to close, new Window options
+• Bunch of fixes`,
 };
 
 // ---------------------------------------------------------------------
@@ -36,6 +43,17 @@ export const SETTINGS = {
   memoryPlays: 12,
   animations: true,
   rescanOnQueueChange: true,
+  // the Window group in the options: fade the window while the mouse is away (how see-through, in %), and what a
+  // click outside it does: 'close' (closes it, the game doesn't get the click), 'through' (closes it and the game
+  // gets the click too) or 'stay' (nothing)
+  fadeAway: true,
+  fadeAmount: 80,
+  clickOutside: 'close',
+  // Esc while editing the queue: 'addon' (closes this window only; the game doesn't get the Esc) or 'both' (closes
+  // this window and lets the Esc through to the game, which closes Edit Queue)
+  escEditing: 'addon',
+  // while editing the queue with its mods menu up, clicks go through this window to the menu under it
+  modsPassThrough: true,
   // the local estimate: each map's newest this many real plays at the queue's rate (closest to your current level)
   localPlays: 5,
   // calibration simulates each real play again: the newest this many per map
@@ -82,7 +100,7 @@ export const TEXT = {
     hours: 'hours',
     startAt: 'Start at',
     startAtTip: 'Leave empty to start from where your character is now',
-    minOfStrain: 'min of strain',
+    minOfStrain: 'minutes of strain',
     runs: 'Runs per play',
     runsTip: 'A play is random, so each one can be simulated a few times and averaged, as the official sim does. More runs: steadier numbers, but more simulator calls on the first scan (later scans reuse them).',
     animations: 'Animations',
@@ -93,6 +111,20 @@ export const TEXT = {
     localPlaysTip: 'For the XP tab\'s local estimate: how many of your newest plays of each map (at the queue\'s rate and mods, last 24 hours) it averages. Fewer: closer to your current level. More: a steadier average. {n} by default.',
     memoryPlays: 'Memory plays',
     memoryPlaysTip: 'For maps that give Speed Jam or Memory XP: how many of your next plays of each the Speed Jam / Memory tab shows',
+    windowGroup: 'Window',
+    fade: 'Fade when the mouse is away',
+    fadeTip: 'The window turns see-through while the mouse is outside it, and back when it comes in. The slider sets how see-through.',
+    clickOutside: 'Click outside',
+    clickOutsideTip: 'What a click outside the window does. A click on Edit the queue, or while it is open, never closes it.',
+    escEditing: 'Esc while editing the queue',
+    escEditingTip: 'What Esc does while Edit Queue is open: close only this window, or close it and Edit Queue too.',
+    escAddon: 'Closes this window',
+    escBoth: 'Closes it and Edit Queue',
+    outsideClose: 'Closes it (the game ignores the click)',
+    outsideThrough: 'Closes it (the game gets the click too)',
+    outsideStay: 'Nothing',
+    modsPass: 'Click through to the mods menu',
+    modsPassTip: 'While editing the queue with the mods menu open, clicks go through this window to the game, so the menu can be used even under it.',
   },
   status: {
     simulating: 'Simulating the queue…',

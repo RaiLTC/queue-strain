@@ -1,18 +1,35 @@
 // Formatting and the small pieces of the window: bars, graphs, the notice and changelog buttons.
 
 import { CHANGELOG, NOTICE, TEXT } from '../config.js';
-import { BAR_ZONES, XP_CUT } from '../rules/fatigue.js';
+import { BAR_ZONES, STAGES, XP_CUT, fatigueLevel, fatigueXp, stageOf } from '../rules/fatigue.js';
 
 export const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 /** A play's start, as a table column: 1:05. */
 export const clock = (sec) => `${Math.floor(sec / 3600)}:${String(Math.floor(sec / 60) % 60).padStart(2, '0')}`;
-/** A stretch of time: 8H 05M, 44M under an hour, <1M under a minute. */
+/** A stretch of time as plain text, for copies and hover tips: 8h 05m, 44m under an hour, <1m under a minute. */
 export const dur = (sec) => {
-  if (!(sec >= 60)) return '<1M';
+  if (!(sec >= 60)) return '<1m';
   const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60;
-  return h ? `${h}H ${String(m).padStart(2, '0')}M` : `${m}M`;
+  return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
 };
-export const minText = (m) => (m < 1 ? `${Math.round(m * 60)} s` : `${m < 10 ? m.toFixed(1) : Math.round(m)} min`);
+/** Short time text for the window: the numbers stand out, the unit letters are small and dim.
+ *  `hot` colours the numbers by unit too (the Levels panel); "<1m" counts as seconds. */
+export const unitsHtml = (text, hot) => esc(text).replace(/(&lt;)?(\d+)([a-z]+)/g, (all, lt, n, u) => `${lt || ''}<span class="qs-num${hot ? ` hot u-${lt ? 's' : u}` : ''}">${n}</span><small class="qs-u">${u}</small>`);
+const UNIT_CLASS = { year: 'y', month: 'mo', day: 'd', hour: 'h', minute: 'm' };
+export const durH = (sec, hot) => unitsHtml(dur(sec), hot);
+/** A stretch of time in words: "1 hour and 30 minutes", "1 year, 2 months, 5 days and 1 minute".
+ *  Units that are zero are left out; a month is 30 days, a year 365. With `html`, the numbers are marked (`hot` colours them). */
+export const durWords = (sec, html, hot) => {
+  let m = Math.max(1, Math.round(sec / 60));
+  const parts = [];
+  for (const [name, size] of [['year', 525600], ['month', 43200], ['day', 1440], ['hour', 60], ['minute', 1]]) {
+    const n = Math.floor(m / size);
+    m -= n * size;
+    if (n) parts.push(`${html ? `<span class="qs-num${hot ? ` hot u-${UNIT_CLASS[name]}` : ''}">${n}</span>` : n} ${name}${n === 1 ? '' : 's'}`);
+  }
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
+};
+export const minText = (m) => { const s = Math.round(m * 60), v = m < 10 ? m.toFixed(1) : String(Math.round(m)); return m < 1 ? `${s} second${s === 1 ? '' : 's'}` : `${v} minute${v === '1.0' || v === '1' ? '' : 's'}`; };
 /** Minutes, short: 1s, 1.4m, 1.2h. */
 export const shortTime = (m) => {
   const sec = m * 60;
@@ -26,46 +43,110 @@ export const SKILL_SHORT = { accuracy: 'Acc', speed: 'Spd', stamina: 'Sta', jack
 export const STAGE_COLOR = { cold: '#4f9cf5', warming: '#4f9cf5', peak: '#e8c147', pushing: '#f0883e', fatigued: '#c084fc' };
 export const arrows = (trend) => (trend > 0 ? `<span style="color:#f0883e">${'›'.repeat(trend)}</span>` : trend < 0 ? `<span style="color:#4f9cf5">${'‹'.repeat(-trend)}</span>` : '<span class="qs-dim">·</span>');
 
-/** Where the bar is at each hour of the forecast, and which of those get a label: every other one and the
- *  last, none closer than 4% to the one before it. */
-export const hourMarks = (samples, hours) => {
-  const step = hours > 12 ? 2 : 1;
-  const marks = [];
-  for (let h = step; h <= hours + 1e-9; h += step) {
-    const s = samples.find(x => x.t >= h * 3600) || samples[samples.length - 1];
-    marks.push({ h, bar: s.bar, label: false });
-  }
-  const want = marks.filter((m, i) => i % 2 === 0 || i === marks.length - 1);
-  const placed = [];
-  for (const m of [...want].reverse()) {
-    if (placed.every(p => Math.abs(p.bar - m.bar) > 0.04)) { m.label = true; placed.push(m); }
-  }
-  return marks;
-};
+/** A zone's colour on the bar: white below the sweet spot, yellow in it, orange past it, red past the XP cut. */
+const zoneColor = (b) => (b < BAR_ZONES[0] ? '#e5e7eb' : b < BAR_ZONES[1] ? '#facc15' : b < XP_CUT ? '#fb923c' : '#f87171');
 
-/** The warm-up bar, as the game draws it: zones, where it is, and where the forecast takes it (a faint band
- *  over the range it moves through and a ring where it is at each hour). */
+/** How much of the physical skills' XP the strain cut leaves at this many minutes of strain, and its colour:
+ *  white while none is lost, then yellow, orange and red as more is. */
+const xpKept = (minutes) => fatigueXp(fatigueLevel(minutes));
+const keptColor = (k) => (k >= 0.995 ? '#fff' : k >= 0.7 ? '#facc15' : k >= 0.3 ? '#fb923c' : '#ef4444');
+
+/** The warm-up bar, as the game draws it: zones and where it is now. Over it, where the forecast takes it:
+ *  a faint band over the range it moves through, and an arrow from now to where it ends, coloured by the zones it crosses. */
 export const barHtml = (bar, ahead) => {
   let future = '';
+  // the XP cut's text, centred on its line; left out when the arrow comes close to it or past it (the red line says enough)
+  let cutText = 'center', pastCut = false;
   if (ahead && ahead.samples.length > 1) {
     const later = ahead.samples.slice(1).map(s => s.bar);
     const lo = Math.min(...later), hi = Math.max(...later);
-    future += `<div class="qs-band" style="left:${(lo * 100).toFixed(2)}%; width:${Math.max(0.6, (hi - lo) * 100).toFixed(2)}%" title="The range the forecast moves through"></div>`;
-    for (const m of hourMarks(ahead.samples, ahead.hours)) {
-      future += `<div class="qs-hour" style="left:${(m.bar * 100).toFixed(2)}%" title="After ${dur(m.h * 3600)}: ${(m.bar * 100).toFixed(0)}%"></div>`;
-      if (m.label) future += `<div class="qs-hour-label" style="left:${(m.bar * 100).toFixed(2)}%">${m.h}H</div>`;
+    const end = later[later.length - 1];
+    const hours = `${ahead.hours} hour${ahead.hours === 1 ? '' : 's'}`;
+    future += `<div class="qs-band" style="left:${(lo * 100).toFixed(2)}%; width:${Math.max(0.6, (hi - lo) * 100).toFixed(2)}%" title="Where it moves in the next ${hours}: ${Math.round(lo * 100)}% to ${Math.round(hi * 100)}%"></div>`;
+    const a = bar * 100, e = end * 100, dir = e >= a ? 1 : -1;
+    const cut = XP_CUT * 100, reach = Math.max(a, e);
+    if (Math.abs(e - a) >= 1) { cutText = reach >= cut - 12 ? 'none' : 'center'; pastCut = reach >= cut; }
+    /** Whether an hour label at x would run into the XP cut's text. */
+    const hitsCut = (x) => cutText === 'center' && Math.abs(x - cut) < 9;
+    if (Math.abs(e - a) >= 1) {
+      // the line's colour follows the zones it passes through
+      const stops = [];
+      for (let k = 0; k <= 20; k++) { const o = k / 20; stops.push(`<stop offset="${o}" stop-color="${zoneColor((a + (e - a) * o) / 100)}"/>`); }
+      const id = `qs-arrow-${Math.random().toString(36).slice(2, 8)}`;
+      // a small mark where the bar is after some of the hours (the end is the arrowhead), its hour written above it
+      let marks = '';
+      // which hours get a mark, most useful first: 2h, 1h, 3h, then every 6th, every 3rd, the rest. As many as the
+      // arrow has room for (about one per 7% of the bar it spans, at least one), none crowding another
+      const room = Math.max(1, Math.floor(Math.abs(e - a) / 7));
+      const all = Array.from({ length: Math.max(0, Math.ceil(ahead.hours) - 1) }, (_, i) => i + 1);
+      const rank = (h) => (h === 2 ? 0 : h === 1 ? 1 : h === 3 ? 2 : h % 6 === 0 ? 3 : h % 3 === 0 ? 4 : 5);
+      const tried = [...all].sort((p, q) => rank(p) - rank(q) || p - q);
+      const chosen = [];
+      for (const h of tried) {
+        if (chosen.length >= room) break;
+        const s = ahead.samples.find(x => x.t >= h * 3600);
+        if (!s) continue;
+        const x = s.bar * 100, kept = xpKept(s.minutes);
+        if (hitsCut(x) || chosen.some(c => Math.abs(c.x - x) < (c.kept < 0.995 && kept < 0.995 ? 7 : 4))) continue;
+        chosen.push({ h, s, x, kept });
+      }
+      chosen.sort((p, q) => p.h - q.h);
+      for (const { h, s } of chosen) {
+        const x = s.bar * 100, kept = xpKept(s.minutes), color = keptColor(kept);
+        const tip = `After ${h} hour${h === 1 ? '' : 's'}: ${Math.round(s.bar * 100)}%${kept < 0.995 ? ` · physical XP kept ×${kept.toFixed(2)}` : ''}`;
+        future += `<div class="qs-hour-label" style="left:${x.toFixed(2)}%; color:${color};" title="${tip}">${h}<small class="qs-u">h</small></div>`;
+        // past the cut, how much physical XP is lost there, under the arrow (a label with it needs more room: see above)
+        if (kept < 0.995) future += `<div class="qs-loss-label" style="left:${x.toFixed(2)}%; color:${color};" title="${tip}">-${Math.round((1 - kept) * 100)}%</div>`;
+        marks += `<line x1="${(s.bar * 100).toFixed(2)}" x2="${(s.bar * 100).toFixed(2)}" y1="2.2" y2="7.8" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" opacity=".9"><title>${tip}</title></line>`;
+      }
+      future += `<svg class="qs-arrow" viewBox="0 0 100 10" preserveAspectRatio="none"><title>After ${hours}: ${Math.round(e)}%</title><defs><linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${a.toFixed(2)}" x2="${e.toFixed(2)}" y1="0" y2="0">${stops.join('')}</linearGradient></defs><line x1="${a.toFixed(2)}" x2="${(e - dir * 1.2).toFixed(2)}" y1="5" y2="5" stroke="url(#${id})" stroke-width="1.6" vector-effect="non-scaling-stroke"/><path d="M${e.toFixed(2)} 5 L${(e - dir * 1.4).toFixed(2)} 1.8 L${(e - dir * 1.4).toFixed(2)} 8.2 Z" fill="${zoneColor(end)}"/>${marks}</svg>`;
     }
+    // a faded line straight down from where it ends, through the bar
+    if (Math.abs(e - a) >= 1) future += `<div class="qs-endline" style="left:${e.toFixed(2)}%"></div>`;
+    future += `<div class="qs-arrow-label" style="left:${e.toFixed(2)}%" title="After ${hours}: ${Math.round(e)}%">${Math.abs(e - a) < 1 ? 'steady' : 'in'} ${ahead.hours}<small class="qs-u">h</small></div>`;
   }
   return `
-  <div class="qs-bar">
+  <div class="qs-bar${pastCut ? ' lossy' : ''}">
     <div class="qs-track"></div>
+    ${future}
     <div class="qs-tick" style="left:${BAR_ZONES[0] * 100}%"></div>
     <div class="qs-tick" style="left:${BAR_ZONES[1] * 100}%"></div>
     <div class="qs-cut" style="left:${XP_CUT * 100}%" title="300 min of strain: XP gains start being cut"></div>
-    <div class="qs-cut-label" style="left:${XP_CUT * 100}%">300 min · XP cut</div>
-    ${future}
+    ${cutText === 'none' ? '' : `<div class="qs-cut-label" style="left:${XP_CUT * 100}%">300 min · XP cut</div>`}
     <div class="qs-needle" style="left:${(bar * 100).toFixed(2)}%"></div>
-  </div>`;
+    ${ahead && ahead.samples.length > 1 ? '<div class="qs-at"></div>' : ''}
+  </div>
+  ${ahead && ahead.samples.length > 1 ? `<div class="qs-slide"><span class="qs-dim">now</span><input type="range" class="qs-slide-in" min="0" max="${Math.round(ahead.hours * 3600)}" step="${ahead.hours > 12 ? 3600 : 1800}"><span class="qs-dim">${ahead.hours}<small class="qs-u">h</small></span><span class="qs-slide-text"></span></div>` : ''}`;
+};
+
+/** Where the forecast is at `t` seconds from now: the bar and the minutes of strain, between the two samples around it. */
+const aheadAt = (ahead, t) => {
+  const s = ahead.samples;
+  const i = s.findIndex(x => x.t >= t);
+  if (i <= 0) return i === 0 ? s[0] : s[s.length - 1];
+  const p = s[i - 1], q = s[i], f = (t - p.t) / Math.max(1, q.t - p.t);
+  return { bar: p.bar + (q.bar - p.bar) * f, minutes: p.minutes + (q.minutes - p.minutes) * f };
+};
+/** The slider's time, kept while the same forecast is redrawn and set back to 2 hours for a new one. */
+let slideSec = 0, slideFor = null;
+/** Wires the time slider under a bar drawn by barHtml: dragging it moves a ghost needle to where the bar is then,
+ *  and says so next to it. */
+export const wireSlider = (box, ahead) => {
+  const input = box.querySelector('.qs-slide-in'), ghost = box.querySelector('.qs-at'), text = box.querySelector('.qs-slide-text');
+  if (!input || !ghost || !ahead) return;
+  if (slideFor !== ahead) { slideFor = ahead; slideSec = Math.min(7200, ahead.hours * 3600); }
+  input.value = String(slideSec);
+  const update = () => {
+    slideSec = Number(input.value);
+    const at = aheadAt(ahead, slideSec), kept = xpKept(at.minutes);
+    ghost.style.left = `${(at.bar * 100).toFixed(2)}%`;
+    ghost.style.display = slideSec > 0 ? '' : 'none';
+    text.innerHTML = slideSec > 0
+      ? `After ${durH(slideSec)}: <b>${Math.round(at.bar * 100)}%</b> · ${STAGES[stageOf(at.bar)][0]}${kept < 0.995 ? ` · <span style="color:${keptColor(kept)}">-${Math.round((1 - kept) * 100)}% physical XP</span>` : ''}`
+      : 'Now';
+  };
+  input.addEventListener('input', update);
+  update();
 };
 
 /** The bar over the forecast: the zones as bands and the bar as a line. */
