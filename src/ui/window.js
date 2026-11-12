@@ -2,9 +2,10 @@
 
 import { SETTINGS, TEXT, VERSION, VERSION_ID, tx } from '../config.js';
 import { cached, forecast, localPlaysOf, modsText, parseGains, saveCache, svCurves } from '../forecast.js';
-import { MINDBLOCK, SKILLS, diagLog, gameRows, geneticsFor, logProblem, movedOn, num, queueKey, readQueue, setting } from '../game.js';
+import { MINDBLOCK, SKILLS, mapNames, diagLog, gameRows, geneticsFor, logProblem, movedOn, num, queueKey, readQueue, setting } from '../game.js';
 import { BAR_ZONES, STAGES, STRAIN_CAP, XP_CUT, barKnots, barOf, gainLevels, levelOf, stageOf, warmup, xpForLevel } from '../rules/fatigue.js';
 import { fatigueGenesOf } from '../rules/genes.js';
+import { readRoutes, routeCumXp, simulateRoute } from '../rules/routes.js';
 import { LOG_READ_KEY, MATCH_HELP, NOTICE_READ_KEY, SKILL_NAMES, SKILL_SHORT, STAGE_COLOR, TABS, arrows, barHtml, changelogHtml, clock, hotfixHtml, hotfixId, HOTFIX_READ_KEY, dur, durH, durWords, esc, fmt, graphHtml, logId, matchColor, matchText, minText, noticeHtml, noticeId, shortTime, unitsHtml, wireSlider } from './parts.js';
 import { CSS } from './style.js';
 
@@ -85,13 +86,17 @@ export const mount = (meta, host) => {
   /** The tab shown (Overview on the first scan after the game starts, then the one picked), and how many
    *  plays the Debug tab lists. */
   let activeTab = 'overview';
+  /** The Levels tab's display: 'regular' or 'overall' (each skill's lifetime level, as on the profile), each also
+   *  with '-route' (upgrades bought along the route add-on's routes); and whether routes are used at all. */
+  let levelsView = 'regular', useRoutes = true;
   let debugLimit = 50;
   /** Debug's every-play section: one table of all plays, or one map's plays at a time as a card. */
-  let debugView = 'table';
-  let debugMap = 0;
+  let debugView = 'table', debugMap = 0;
   try {
     const saved = JSON.parse(localStorage.getItem('queue-strain:prefs') || '{}');
     if (saved.hours) hoursInput.value = wholeHours(saved.hours);
+    if (['regular', 'overall', 'regular-route', 'overall-route'].includes(saved.levelsView)) levelsView = saved.levelsView.startsWith('overall') ? 'overall' : 'regular';
+    if (saved.useRoutes !== undefined) useRoutes = !!saved.useRoutes;
     autoBox.checked = saved.autoRescan ?? SETTINGS.rescanOnQueueChange;
     animBox.checked = saved.animations ?? SETTINGS.animations;
     if (saved.localPlays) localInput.value = String(Math.min(50, Math.max(1, Math.round(saved.localPlays))));
@@ -145,7 +150,7 @@ export const mount = (meta, host) => {
   root.addEventListener('mouseenter', () => { mouseIn = true; applyFade(); });
   root.addEventListener('mouseleave', () => { mouseIn = false; applyFade(); });
   const savePrefs = () => {
-    try { localStorage.setItem('queue-strain:prefs', JSON.stringify({ hours: wholeHours(hoursInput.value), runsPerPlay2: parseInt(runsInput.value, 10) || SETTINGS.runsPerPlay, autoRescan: autoBox.checked, animations: animBox.checked, localPlays: localCount(), memPlays, tab: activeTab, fade: fadeBox.checked, fadeAmount: Number(fadeAmt.value), clickOutside: outsideSel.value, modsPassThrough: modsBox.checked, optionsPassThrough: optsBox.checked, chatHole: chatBox.checked, escEditing: escSel.value, windowGroupOpen: winGroup.open })); } catch (_) {}
+    try { localStorage.setItem('queue-strain:prefs', JSON.stringify({ hours: wholeHours(hoursInput.value), runsPerPlay2: parseInt(runsInput.value, 10) || SETTINGS.runsPerPlay, autoRescan: autoBox.checked, animations: animBox.checked, localPlays: localCount(), memPlays, tab: activeTab, fade: fadeBox.checked, fadeAmount: Number(fadeAmt.value), clickOutside: outsideSel.value, modsPassThrough: modsBox.checked, optionsPassThrough: optsBox.checked, chatHole: chatBox.checked, escEditing: escSel.value, levelsView, useRoutes, windowGroupOpen: winGroup.open })); } catch (_) {}
   };
   modsBox.addEventListener('change', () => { applyFade(); savePrefs(); });
   escSel.addEventListener('change', savePrefs);
@@ -210,6 +215,18 @@ export const mount = (meta, host) => {
   let scanKey = null;
   /** A change waiting to settle: its queue and when it was first seen. */
   let changedKey = null, changedAt = 0;
+  /** The character's upgrades and prestiges at the last scan, to rescan when one changes (an upgrade bought). */
+  let upgKey = null, upgChar = null, upgCheckAt = 0;
+  const upgKeyOf = (row) => SKILLS.map(sk => `${num(row[`${sk}Upgrades`])}/${num(row[`${sk}Prestige`])}`).join(',');
+  const watchUpgrades = async () => {
+    if (!root || !shown() || !upgKey || upgChar === null || autoPaused || scanning || !autoBox.checked) return;
+    const now = Date.now();
+    if (now - upgCheckAt < 5000) return;
+    upgCheckAt = now;
+    const rows = await gameRows('SELECT * FROM character WHERE id = ? LIMIT 1', [upgChar]);
+    if (!rows || !rows[0] || scanning) return;
+    if (upgKeyOf(rows[0]) !== upgKey) { upgKey = upgKeyOf(rows[0]); void scan(TEXT.status.updating, true); }
+  };
   /** A scan the player stopped (or closed the window on) isn't started again by itself until they scan. */
   let autoPaused = false;
   /** How long a change waits before the update: none when only repeats changed, a moment when the maps did. */
@@ -218,7 +235,7 @@ export const mount = (meta, host) => {
     return (maps(then) === maps(now) ? SETTINGS.rescanWaitSec.repeats : SETTINGS.rescanWaitSec.maps) * 1000;
   };
   /** The queue is checked every SETTINGS.queueCheckMs, only while the window is open. */
-  const startQueueWatch = () => { if (!queueTimer) queueTimer = setInterval(() => { fitAroundQueue(); updateOverlays(); watchQueue(); }, SETTINGS.queueCheckMs); };
+  const startQueueWatch = () => { if (!queueTimer) queueTimer = setInterval(() => { fitAroundQueue(); updateOverlays(); watchQueue(); void watchUpgrades(); }, SETTINGS.queueCheckMs); };
   const stopQueueWatch = () => { if (queueTimer) { clearInterval(queueTimer); queueTimer = null; } };
   const watchQueue = () => {
     if (!root || !shown() || !scanKey || autoPaused) return;
@@ -428,6 +445,24 @@ export const mount = (meta, host) => {
     updateOverlays();
   };
   window.addEventListener('pointermove', moveListener, true);
+  // a wheel turned over the chat scrolls the chat, even where this window lies over or under it (issue #11)
+  root.addEventListener('wheel', (e) => {
+    const chat = document.querySelector('.community-chat-container.is-enabled');
+    if (!chat) return;
+    const c = chat.getBoundingClientRect();
+    if (e.clientX < c.left || e.clientX > c.right || e.clientY < c.top || e.clientY > c.bottom) return;
+    // the chat's scrolling list under the mouse: the first element below this window that can scroll
+    const under = document.elementsFromPoint(e.clientX, e.clientY).find(el => !root.contains(el) && chat.contains(el)) || chat;
+    for (let el = under; el && el !== document.body; el = el.parentElement) {
+      const st = getComputedStyle(el);
+      if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 1) {
+        el.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        e.preventDefault();
+        return;
+      }
+      if (el === chat) break;
+    }
+  }, { passive: false });
   /** The game's menus over or under the window: while the mods menu (in Edit Queue) or the options menu is open,
    *  clicks go through the whole window and it turns see-through; while the chat is open, the part of the window
    *  over it is cut out, so the chat shows and takes clicks there. Run as the mouse moves and with the queue check. */
@@ -458,13 +493,24 @@ export const mount = (meta, host) => {
   optsBox.addEventListener('change', () => { updateOverlays(); savePrefs(); });
   chatBox.addEventListener('change', () => { updateOverlays(); savePrefs(); });
 
+  /** The state's name over the bar, at the mark where that state begins (Sweet Spot in the middle of its band, the
+   *  ends at the bar's ends), with the next play's arrows on the side it heads to (inward at the ends); the name alone is centred. */
+  const STATE_AT = { cold: 0, warming: 20, peak: 50, pushing: 80, fatigued: 100 };
+  const stateLabel = (c, name) => {
+    const at = STATE_AT[c.stage] ?? 50, edge = at <= 0 ? 'left' : at >= 100 ? 'right' : '';
+    const tr = c.trend ? `<span class="qs-trend" title="Where the next play pushes it">${arrows(c.trend)}</span>` : '';
+    const right = edge === 'left' || (edge !== 'right' && c.trend > 0);
+    const nm = `<span style="color:${STAGE_COLOR[c.stage]}">${name}</span>`;
+    const pos = edge === 'left' ? 'left:0;' : edge === 'right' ? 'right:0;' : `left:${at}%; transform:translateX(-50%);`;
+    return `<span class="qs-state" style="${pos}">${nm}${tr.replace('class="qs-trend"', `class="qs-trend ${right ? 'side-r' : 'side-l'}"`)}</span>`;
+  };
   const renderNow = (c) => {
     const [name, hint] = STAGES[c.stage];
     nowEl.innerHTML = `
       <div class="qs-h">Strain Status</div>
       <div><b>${name}</b> - ${hint}</div>
       <div>${minText(c.minutes)} of strain / ${Math.round(c.warm * 100)}% warm / sweet spot from ${Math.round(c.knots[1])} minutes / <span style="color:#f87171">XP cut at ${Math.round(c.knots[3])} minutes</span></div>
-      <div class="qs-bar-labels"><span style="color:${STAGE_COLOR[c.stage]}">${name}</span>${c.trend ? `<span class="qs-trend" title="Where the next play pushes it">${arrows(c.trend)}</span>` : ''}</div>
+      <div class="qs-bar-labels">${stateLabel(c, name)}</div>
       ${barHtml(c.bar, c.ahead)}
       ${c.note ? `<div class="qs-dim">${c.note}</div>` : ''}`;
     wireSlider(nowEl, c.ahead);
@@ -503,6 +549,7 @@ export const mount = (meta, host) => {
       if (rows === null) throw new Error('The game has not opened its database yet.');
       if (!rows.length) rows = await gameRows('SELECT * FROM character WHERE current = 1 LIMIT 1');
       const row = rows && rows[0];
+      if (row) { upgKey = upgKeyOf(row); upgChar = row.id; }
       if (!row) throw new Error('Your character was not found in the game\'s database.');
 
       const geneSource = await geneticsFor(row);
@@ -632,7 +679,6 @@ export const mount = (meta, host) => {
           ${Object.entries(views).map(([id, label]) => `<button type="button" class="qs-con-view${consoleView === id ? ' on' : ''}" data-view="${id}">${label}</button>`).join('')}
           <span style="flex:1;"></span>
           <button type="button" class="qs-con-live${consoleLive ? ' on' : ''}" title="${consoleLive ? `Checking for new plays every ${LIVE_CHECK_MS / 1000}s. Click to pause.` : 'Paused. Click to follow new plays again.'}">${consoleLive ? '<i></i>Live' : 'Paused'}</button>
-          <button type="button" class="qs-plain qs-con-copy">Copy</button>
           <button type="button" class="qs-plain qs-con-dev" title="Also print these tables to the developer console (Ctrl+Shift+I)">Send to dev console</button>
           <button type="button" class="qs-con-x" title="Close the console (Esc)">✕</button>
         </div>
@@ -645,7 +691,7 @@ export const mount = (meta, host) => {
             <div class="qs-con-line">&gt; your last ${data.played.length} plays, as the game stored them (newest first). These should match #logs.</div>
             <div class="qs-con-line">&gt; ${consoleLive ? `live: checked ${clockOf(data.checkedAt)}` : 'paused'}${data.lastNewAt ? ` · ${data.fresh} new play${data.fresh === 1 ? '' : 's'} at ${clockOf(data.lastNewAt)}, marked until newer plays arrive` : ' · no new plays since the console opened'}</div>
             ${consoleTable(data.played, data.fresh)}` : `
-            <div class="qs-con-line">&gt; calibration: each real play simulated again as it was played (its rate, mods, Tries and levels then; strain is now's)</div>
+            <div class="qs-con-line">&gt; calibration: real plays re-simulated</div>
             ${consoleTable(data.calibRows)}
             <div class="qs-con-line" style="margin-top:10px;">&gt; per skill: Factor = Real ÷ Simulator</div>
             ${consoleTable(data.calibSummary)}`}
@@ -655,12 +701,6 @@ export const mount = (meta, host) => {
       const newBody = consoleEl.querySelector('.qs-con-body');
       if (keep) { newBody.scrollTop = keep.top; newBody.scrollLeft = keep.left; }
       for (const b of consoleEl.querySelectorAll('.qs-con-view')) b.onclick = () => { consoleView = b.dataset.view; draw(); };
-      const copyB = consoleEl.querySelector('.qs-con-copy');
-      copyB.onclick = async () => {
-        const text = consoleView === 'diag' && data.diag ? data.diag.text : consoleView === 'played' ? tsv(data.played) : `${tsv(data.calibRows)}\n\n${tsv(data.calibSummary)}`;
-        copyB.textContent = (await copyText(text)) ? 'Copied' : 'Copy failed';
-        setTimeout(() => { if (copyB.isConnected) copyB.textContent = 'Copy'; }, 1500);
-      };
       const devB = consoleEl.querySelector('.qs-con-dev');
       devB.onclick = () => {
         console.groupCollapsed(`[Queue Strain] your last ${data.played.length} plays, as the game stored them`);
@@ -800,10 +840,14 @@ export const mount = (meta, host) => {
         <td><span class="qs-mini"><b style="left:${XP_CUT * 100}%"></b><i style="left:${(p.bar * 100).toFixed(1)}%"></i></span> <span style="color:${STAGE_COLOR[stageOf(p.bar)]}">${(p.bar * 100).toFixed(0)}%</span>${p.passed ? '' : ' <span style="color:#fca5a5">fail</span>'}</td>
       </tr>`;
     }).join('');
+    // the three skills this queue gives the most XP to (issue #4)
+    const topSkills = SKILLS.map(sk => [sk, r.plays.reduce((t, p) => t + xpOf(p, sk), 0)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([sk]) => SKILL_NAMES[sk]);
+    const topSkillsLine = topSkills.length ? `<div style="margin-bottom:6px;"><span class="qs-dim">Trains most:</span> <b>${topSkills.length > 1 ? `${topSkills.slice(0, -1).join(', ')} and ${topSkills[topSkills.length - 1]}` : topSkills[0]}</b></div>` : '';
     const overview = `
       <div class="qs-cols">
         <div class="qs-card">
           <div class="qs-h">Where This Queue Takes You</div>
+          ${topSkillsLine}
           ${facts(outlook)}
           ${graphHtml(r.samples, endSec)}
         </div>
@@ -966,10 +1010,8 @@ export const mount = (meta, host) => {
       svPage = Math.min(Math.max(0, svPage), r.sv.length - 1);
       const pages = r.sv.length;
       const { entry, share, start, rows: simRows } = r.sv[svPage];
-      // Speed Jam takes the map's mindblock as the forecast first plays it; Memory never does
-      const firstOfMap = r.plays.find(p => queue.entries[p.entry].beatmapId === entry.beatmapId);
-      const svBlock = firstOfMap ? num(firstOfMap.block ?? 1) : 1;
-      const rows = simRows.map(x => ({ ...x, speedjam: x.speedjam * svBlock * factorOf('speedjam'), memory: x.memory * factorOf('memory') }));
+      // Speed Jam takes each play's mindblock as the forecast plays it; Memory never does
+      const rows = simRows.map(x => ({ ...x, speedjam: x.speedjam * num(x.block ?? 1) * factorOf('speedjam'), memory: x.memory * factorOf('memory') }));
       const top = rows.reduce((best, x) => (x.memory > best.memory ? x : best), rows[0]);
       // a peak only when Memory turns down within the plays shown; at the last row it may still be rising
       const peak = top && top.memory > 0 && top !== rows[rows.length - 1] ? top : null;
@@ -1012,9 +1054,17 @@ export const mount = (meta, host) => {
       const loopSec = r.loopSec || 0;
       const marks = [6, 12, 24].filter(h => h < ctx.hours - 1e-6);
       const MAP_COLORS = SETTINGS.colors.maps;
+      // the display: regular or overall (lifetime levels), and with the route add-on's routes when it is installed,
+      // routes are on and a '+ route' display is picked
+      const routesAll = readRoutes();
+      const routesOn = !!routesAll && useRoutes;
+      const lifetimeView = levelsView.startsWith('overall');
+      const routeView = routesOn && !lifetimeView;
+      const viewNow = lifetimeView ? 'overall' : 'regular';
       /** A row of the table: `sk` (a skill, or 'overall'), from level L0 with x0 XP into it, to the goal level
-       *  `need` (prestige, or rebirth for overall), earning `gainOf(play)` a play. */
-      const progressRow = (sk, L0, x0, need, gainOf) => {
+       *  `need` (prestige, or rebirth for overall), earning `gainOf(play)` a play. `lifetime`: the skill's overall
+       *  level, whose goal is just its next level. */
+      const progressRow = (sk, L0, x0, need, gainOf, lifetime = false) => {
         const start = levelOf(L0, x0);
         const overall = sk === 'overall';
         const cost = xpForLevel(L0);
@@ -1025,6 +1075,8 @@ export const mount = (meta, host) => {
         // from 100, a step a level up to prestige (2 when it's 6-10 away), starting at 105 once past it
         const barMarks = (() => {
           const out = [];
+          // an overall level past 100: one piece, this level to the next
+          if (lifetime && start >= 100) return [L0, L0 + 1];
           // already able to prestige: one full piece up to its prestige level
           if (start >= need) return [need - 1, need];
           if (start < 100) {
@@ -1066,9 +1118,33 @@ export const mount = (meta, host) => {
         const later = (xpLeft) => (perH > 0 ? spanSec + Math.max(0, xpLeft - cum) / perH * 3600 : Infinity);
         const nextSec = nextAt ?? later(cost - x0);
         const readySec = readyAt ?? later(toPrestige);
-        return { sk, overall, L0, x0, start, need, cost, toPrestige, cum, readyAt, nextSec, readySec, end, perH, atMark, byMap, barMarks, markAt };
+        return { sk, overall, lifetime, L0, x0, start, need, cost, toPrestige, cum, readyAt, nextSec, readySec, end, perH, atMark, byMap, barMarks, markAt };
       };
-      const skillRows = SKILLS.map(sk => progressRow(sk, Math.floor(num(row0[sk])), num(row0[`${sk}XP`]), 100 + num(row0[`${sk}Prestige`]), p => xpOf(p, sk)));
+      const skillRows = SKILLS.map((sk) => {
+        const L0 = Math.floor(num(row0[sk])), x0 = num(row0[`${sk}XP`]), prestige = num(row0[`${sk}Prestige`]);
+        // following the route: the upgrades bought on the way, and each play's XP scaled by what they add
+        const gene = genetics[sk];
+        const sim = routeView ? simulateRoute({ plays: r.plays, gainOf: p => xpOf(p, sk), L0, x0, upgrades: num(row0[`${sk}Upgrades`]), overdrive: num(row0[`${sk}Overdrive`]),
+          prestige, route: routesAll[prestige] || [], odPct: gene ? 5 * num(gene.odGene) * num(gene.strength) : 0, need: 100 + prestige, basePerH: perHour(p => xpOf(p, sk)), spanSec }) : null;
+        const gainOf = sim ? (p) => xpOf(p, sk) * (sim.ratioOf.get(p) ?? 1) : (p) => xpOf(p, sk);
+        let x;
+        if (lifetimeView) {
+          // the overall level: all the XP the skill ever earned (at least what its level now took)
+          const lt = gainLevels(0, 0, Math.max(num(row0[`${sk}LifetimeXp`]), routeCumXp(levelOf(L0, x0))));
+          x = progressRow(sk, lt.level, lt.xp, lt.level + 1, gainOf, true);
+        } else {
+          x = progressRow(sk, L0, x0, 100 + prestige, gainOf);
+          if (sim) {
+            // the level drops at each upgrade, so where it is and when it gets somewhere come from the route's run
+            x.end = sim.endLevel; x.readyAt = sim.readyAt; x.readySec = sim.readySec; x.toPrestige = 0;
+            x.markAt = {};
+            for (const m of x.barMarks) { const hit = m > x.start ? sim.samples.find(q => q.t > 0 && q.level >= m) : null; if (hit) x.markAt[m] = hit.t; }
+            x.atMark = marks.map((h) => { let lv = sim.samples[0].level; for (const q of sim.samples) { if (q.t <= h * 3600 + 1e-6) lv = q.level; else break; } return lv; });
+          }
+        }
+        x.sim = sim;
+        return x;
+      });
       // the overall level, as rebirth counts it: every skill's lifetime XP together. Rebirth at 110, 10 more a generation.
       const lifetime = SKILLS.reduce((t, sk) => t + num(row0[`${sk}LifetimeXp`]), 0);
       const overallNow = gainLevels(0, 0, lifetime);
@@ -1083,9 +1159,17 @@ export const mount = (meta, host) => {
       /** The bar: one piece between each pair of marks, filled to your level and, fainter, to where this queue takes
        *  you. Under each piece its end mark, with the time if it's reached within the look-ahead. A skill that
        *  reaches prestige within it shifts its last piece's progress to pink. */
+      /** A purchase on the route: "Upgrade #4 at Lv 91 · in 2h 10m". */
+      const upgradeWhen = (ev) => (ev.at <= 0 ? TEXT.levels.readyNow : ev.at <= spanSec + 1 ? `in ${dur(ev.at)}` : `~${ev.at < 86400 ? dur(ev.at) : `${Math.floor(Math.round(ev.at / 3600) / 24)}d ${Math.round(ev.at / 3600) % 24}h`}`);
+      /** The nearest upgrade's time, short, for its label on the bar: now, 2h 10m, ~5d 8h. */
+      const upgradeSoon = (ev) => (ev.at <= 0 ? TEXT.levels.upgradeNow : ev.at < 86400 ? `${ev.at > spanSec + 1 ? '~' : ''}${durH(ev.at)}` : `~${unitsHtml(`${Math.floor(Math.round(ev.at / 3600) / 24)}d ${Math.round(ev.at / 3600) % 24}h`)}`);
+      const upgradeText = (ev) => `${tx(TEXT.levels.upgradeAt, { k: ev.k, lv: ev.level.toFixed(ev.level % 1 ? 2 : 0) })} · ${upgradeWhen(ev)}`;
       const levelsBar = (x) => {
         const m = x.barMarks, n = m.length - 1;
-        const soon = x.readyAt !== undefined && x.readyAt > 0;
+        const soon = !x.lifetime && x.readyAt !== undefined && x.readyAt > 0;
+        const ups = x.sim && !x.lifetime ? x.sim.events : [];
+        const next = ups[0];
+        let above = false;
         const cells = [];
         for (let k = 0; k < n; k++) {
           const a2 = m[k], b2 = m[k + 1];
@@ -1093,19 +1177,30 @@ export const mount = (meta, host) => {
           const endF = Math.max(0, Math.min(1, (Math.min(x.end, b2) - a2) / (b2 - a2)));
           const last = k === n - 1;
           const at = x.markAt[b2];
-          const goal = last && x.start >= 100 && b2 === x.need;
+          const goal = !x.lifetime && last && x.start >= 100 && b2 === x.need;
+          // only the route's next upgrade, if it's in this piece (the ones after come after a level drop): its line, number and time
+          // until it ("#4 2h 10m"), under the bar, or above it when it sits in the first 5% of the bar's first piece (measured like the progress, from its start mark)
+          const here = (next ? [next] : []).filter(ev => ev.level > a2 + (k ? 1e-9 : -1e-9) && ev.level <= b2 + 1e-9);
+          const leftOf = (ev) => `${((ev.level - a2) / (b2 - a2) * 100).toFixed(2)}%`;
+          const upMarks = here.map(ev => `<b class="qs-lv-up" style="left:${leftOf(ev)}" title="${esc(upgradeText(ev))}"></b>`).join('');
+          let upLabels = '';
+          if (next && here.includes(next)) {
+            const f = (next.level - a2) / (b2 - a2);
+            above = k === 0 && f < 0.05;
+            upLabels = `<span class="qs-lv-uplbl ${above ? 'above' : 'below'}" style="left:${(f * 100).toFixed(2)}%;${k === n - 1 && f > 0.9 ? ' transform:translateX(calc(-100% - 4px));' : ''}" title="${esc(upgradeText(next))}">#${next.k} ${upgradeSoon(next)}</span>`;
+          }
           const label = `${b2}${at !== undefined ? ` · ${durH(at)}` : ''}`;
           // a piece this queue completes within the look-ahead: its progress shifts to white (pink when it's the prestige)
           const completes = endF >= 1 && nowF < 1;
-          cells.push(`<div class="qs-lv-cell"><div class="qs-lv-seg${last && soon ? ' shift' : completes ? ' complete' : ''}">${endF > nowF ? `<i class="gain" style="left:${nowF * 100}%; width:${(endF - nowF) * 100}%"></i>` : ''}<i style="width:${nowF * 100}%"></i></div>
+          cells.push(`<div class="qs-lv-cell"><div class="qs-lv-seg${last && soon ? ' shift' : completes ? ' complete' : ''}">${endF > nowF ? `<i class="gain" style="left:${nowF * 100}%; width:${(endF - nowF) * 100}%"></i>` : ''}<i style="width:${nowF * 100}%"></i>${upMarks}</div>${upLabels}
             <span class="qs-lv-tk${last ? '' : ' mid'}${goal ? ' goal' : at !== undefined ? ' time' : ''}">${label}</span></div>`);
         }
-        return `<div class="qs-lv-bar"><span class="qs-lv-tk first">${m[0]}</span>${cells.join('')}</div>`;
+        return `<div class="qs-lv-bar${above ? ' ups' : ''}"><span class="qs-lv-tk first">${m[0]}</span>${cells.join('')}</div>`;
       };
       const prestigeText = (x) => {
         if (x.readyAt === 0) return `<span class="qs-ready">${TEXT.levels.readyNow}</span>`;
         if (!isFinite(x.readySec)) return '<span class="qs-faint">–</span>';
-        return x.readyAt !== undefined ? `<span style="font-weight:600;">in ${durH(x.readySec, true)}</span>` : `<span title="${esc(TEXT.levels.keepPlaying)}">${longDur(x.readySec)}</span>`;
+        return x.readyAt !== undefined ? `<span style="font-weight:600; color:var(--qs-prestige);">${durH(x.readySec)}</span>` : `<span title="${esc(TEXT.levels.keepPlaying)}">${longDur(x.readySec)}</span>`;
       };
       /** The overall rebirth time in words, numbers coloured: "in 3 days and 4 hours". */
       const wordsDur = (sec) => `in ${durWords(sec, true, true)}`;
@@ -1113,7 +1208,9 @@ export const mount = (meta, host) => {
         if (x.readyAt === 0 || !isFinite(x.readySec)) return prestigeText(x);
         return x.readyAt !== undefined ? `<span style="font-weight:600;">${wordsDur(x.readySec)}</span>` : `<span title="${esc(TEXT.levels.keepPlaying)}">${wordsDur(x.readySec)}</span>`;
       };
-      const shareOf = (x) => (totalPerH > 0 ? Math.round(x.perH / totalPerH * 100) : 0);
+      // a skill's share of all the XP per hour (with a route: of the XP as the routes' upgrades make it)
+      const allPerH = routeView ? skillRows.reduce((t, x) => t + x.perH, 0) : totalPerH;
+      const shareOf = (x) => (allPerH > 0 ? Math.round(x.perH / allPerH * 100) : 0);
       const detailRow = (x) => {
         const ranked = [...x.byMap.entries()].filter(([, v]) => v > 0).sort((a2, b2) => b2[1] - a2[1]);
         const sum = ranked.reduce((t, [, v]) => t + v, 0);
@@ -1132,13 +1229,15 @@ export const mount = (meta, host) => {
             <span class="qs-dim">${TEXT.levels.now}</span><span>${x.start.toFixed(2)}</span>
             ${marks.map((h, k) => `<span class="qs-dim">${tx(TEXT.levels.after, { time: durH(h * 3600) })}</span><span>${x.atMark[k].toFixed(2)}</span>`).join('')}
             <span class="qs-dim">${tx(TEXT.levels.after, { time: durH(spanSec) })}</span><span>${x.end.toFixed(2)}</span>
-            <span class="qs-dim">${x.overall ? TEXT.levels.rebirth : TEXT.levels.prestige}</span><span title="${x.toPrestige ? tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) }) : ''}">${prestigeText(x)}</span></div></div>
+            <span class="qs-dim">${x.overall ? TEXT.levels.rebirth : x.lifetime ? TEXT.levels.nextLevel : TEXT.levels.prestige}</span><span title="${x.toPrestige ? tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) }) : ''}">${prestigeText(x)}</span>
+            ${x.sim ? `<span class="qs-dim">${TEXT.levels.nextUpgrade}</span><span>${x.sim.events.length ? esc(upgradeText(x.sim.events[0])) : x.sim.tracked ? TEXT.levels.routeDone : tx(TEXT.levels.noRoute, { p: x.sim.prestige })}</span>
+            <span class="qs-dim">${TEXT.levels.upgradesLeft}</span><span>${x.sim.events.length}</span>` : ''}</div></div>
           <div><div class="qs-lv-dh">${TEXT.levels.xpTitle}</div><div class="qs-lv-kv">
             <span class="qs-dim">${TEXT.levels.perHour}</span><span>${x.perH > 0 ? `${fmt(x.perH)}${x.overall ? '' : ` <span class="qs-faint">${tx(TEXT.levels.queueShare, { pct: shareOf(x) })}</span>`}` : '–'}</span>
             <span class="qs-dim">${TEXT.levels.perPlay}</span><span>${plays ? fmt(x.cum / plays) : '–'}</span>
             ${loopSec ? `<span class="qs-dim">${TEXT.levels.perLoop}</span><span>${fmt(x.perH * loopSec / 3600)}</span>` : ''}
             <span class="qs-dim">${tx(TEXT.levels.within, { time: durH(spanSec) })}</span><span>${fmt(x.cum)}</span>
-            <span class="qs-dim">${x.overall ? TEXT.levels.toRebirth : TEXT.levels.toPrestige}</span><span>${x.toPrestige ? fmt(x.toPrestige) : '–'}</span></div></div>
+            <span class="qs-dim">${x.overall ? TEXT.levels.toRebirth : x.lifetime ? TEXT.levels.nextLevel : TEXT.levels.toPrestige}</span><span>${x.toPrestige ? fmt(x.toPrestige) : '–'}</span></div></div>
         </div></td></tr>`;
       };
       // the overall level sits on its own above the skills: one line, then its bar. It doesn't open.
@@ -1149,7 +1248,7 @@ export const mount = (meta, host) => {
       const rowsHtml = skillRows.map((x) => {
         const open = levelsOpen.has(x.sk);
         return `<tr class="qs-lv-row${open ? ' open' : ''}${x.overall ? ' qs-lv-overall' : ''}" data-skill="${x.sk}">
-          <td class="qs-lv-skill"><span class="qs-lv-caret">${open ? '▾' : '▸'}</span>${x.overall ? TEXT.levels.overall : SKILL_NAMES[x.sk]}<span class="qs-sub">Lv ${x.start.toFixed(2)}</span></td>
+          <td class="qs-lv-skill"><span class="qs-lv-caret">${open ? '▾' : '▸'}</span>${x.overall ? TEXT.levels.overall : SKILL_NAMES[x.sk]}<span class="qs-sub">${x.start.toFixed(2)}</span></td>
           <td class="n qs-lv-xph">${x.perH > 0 ? `<b>${fmt(x.perH)}</b>${x.overall ? '' : `<span class="qs-faint"> ${shareOf(x)}%</span>`}` : '<span class="qs-faint">–</span>'}</td>
           <td class="n qs-lv-pres" title="${x.overall ? tx(TEXT.levels.rebirthAt, { n: x.need }) : ''}${x.toPrestige ? `${x.overall ? ': ' : ''}${tx(TEXT.levels.xpToGo, { xp: fmt(x.toPrestige) })}` : ''}">${x.overall ? `<span class="qs-faint">${TEXT.levels.rebirth} </span>` : ''}${prestigeText(x)}</td>
           <td class="qs-lv-barcell">${levelsBar(x)}</td>
@@ -1159,12 +1258,17 @@ export const mount = (meta, host) => {
       <div class="qs-card">
         <div class="qs-h">${TEXT.levels.title}</div>
         ${overallHtml}
-        <div class="qs-dim" style="margin-bottom:6px;">${TEXT.levels.intro}</div>
+        <div class="qs-row" style="margin-bottom:4px;">
+          <span class="qs-dim">${TEXT.levels.display}</span>
+          <select id="qs-lv-view" style="width:auto; field-sizing:content;">${[['regular', TEXT.levels.viewRegular], ['overall', TEXT.levels.viewOverall]].map(([v, label]) => `<option value="${v}"${v === viewNow ? ' selected' : ''}>${label}</option>`).join('')}</select>
+          ${routesAll ? `<label class="qs-dim" style="display:flex; align-items:center; gap:4px; margin-left:8px;" title="${esc(TEXT.levels.useRoutesTip)}"><input id="qs-lv-routes" type="checkbox"${useRoutes ? ' checked' : ''} style="margin:0;"> ${TEXT.levels.useRoutes}</label>` : ''}
+        </div>
+        <div class="qs-dim" style="margin-bottom:6px;">${lifetimeView ? TEXT.levels.introOverall : TEXT.levels.intro}${routeView ? ` ${TEXT.levels.introRoute}` : ''}</div>
         <table class="qs-lv">
-          <thead><tr><th>${TEXT.levels.skill}</th><th class="n">${TEXT.levels.xph}</th><th class="n">${TEXT.levels.prestige}</th><th style="padding-left:16px;">${TEXT.levels.bar}</th></tr></thead>
+          <thead><tr><th>${TEXT.levels.skill}</th><th class="n">${TEXT.levels.xph}</th><th class="n">${lifetimeView ? TEXT.levels.nextLevel : TEXT.levels.prestige}</th><th style="padding-left:16px;">${lifetimeView ? TEXT.levels.barOverall : TEXT.levels.bar}</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
-        <div class="qs-legend" style="margin-top:6px;"><span><i class="qs-sw" style="background:var(--qs-now);"></i>${TEXT.levels.legendNow}</span><span><i class="qs-sw" style="background:var(--qs-now); opacity:.45;"></i>${TEXT.levels.legendProgress}</span><span class="qs-lg-complete"><i class="qs-sw qs-sw-complete"></i>${TEXT.levels.legendComplete}</span><span><i class="qs-sw qs-sw-shift"></i>${TEXT.levels.legendPrestige}</span></div>
+        <div class="qs-legend" style="margin-top:6px;"><span><i class="qs-sw" style="background:var(--qs-now);"></i>${TEXT.levels.legendNow}</span><span><i class="qs-sw" style="background:var(--qs-now); opacity:.45;"></i>${TEXT.levels.legendProgress}</span><span class="qs-lg-complete"><i class="qs-sw qs-sw-complete"></i>${TEXT.levels.legendComplete}</span>${lifetimeView ? '' : `<span><i class="qs-sw qs-sw-shift"></i>${TEXT.levels.legendPrestige}</span>`}${routeView && !lifetimeView ? `<span><i class="qs-sw" style="background:#fbbf24; width:3px;"></i>${TEXT.levels.legendUpgrade}</span>` : ''}</div>
       </div>`;
     }
 
@@ -1197,8 +1301,8 @@ export const mount = (meta, host) => {
     const calibTotal = calibSkills.reduce((t, sk) => ({ real: t.real + r.calib.real[sk], est: t.est + estOf(sk) }), { real: 0, est: 0 });
     const calibPanel = `
       <div class="qs-card"><div class="qs-h">Calibration</div>
-        <div class="qs-dim" style="margin-bottom:4px;">Each of your last plays of these maps${r.calib ? ` (${r.calib.plays})` : ''} at the queue's rate, simulated again as it was played (its rate, mods, Tries, levels and mindblock then; strain is now's), against what it really earned. The simulator side has each play's mindblock and your genetics on it. ${medals.ok ? `Your medals are ×${medals.multiplier.toFixed(3)}: a factor close to that means the add-on's numbers match your real plays.` : 'The server couldn\'t be reached, so these factors stand in for your medals.'}</div>
-        ${calibSkills.length ? `<div style="overflow-x:auto;"><table><thead><tr><th>Skill</th><th class="n">Plays</th><th class="n">Real</th><th class="n" title="The add-on's estimate for these same plays: the simulator's XP with mindblock, your genetics and your medals">With your bonuses</th><th class="n" title="the lowest and highest single-play factor">Range</th><th class="n" title="Real ÷ the simulator with mindblock and genetics, before medals: close to your medals is right">Factor</th><th class="n" title="${MATCH_HELP}" style="cursor:help;">Match ⓘ</th></tr></thead><tbody>
+        <div class="qs-dim" style="margin-bottom:4px;">Your last plays${r.calib ? ` (${r.calib.plays})` : ''} re-simulated vs real XP. ${medals.ok ? `Factor near ×${medals.multiplier.toFixed(3)} (medals) = accurate.` : 'No server: factors stand in for medals.'}</div>
+        ${calibSkills.length ? `<div style="overflow-x:auto;"><table><thead><tr><th>Skill</th><th class="n">Plays</th><th class="n">Real</th><th class="n" title="The add-on's estimate for these same plays: the simulator's XP with mindblock, your genetics and your medals">With bonuses</th><th class="n" title="the lowest and highest single-play factor">Range</th><th class="n" title="Real ÷ the simulator with mindblock and genetics, before medals: close to your medals is right">Factor</th><th class="n" title="${MATCH_HELP}" style="cursor:help;">Match ⓘ</th></tr></thead><tbody>
           ${calibSkills.map(sk => `<tr><td>${SKILL_NAMES[sk]}</td><td class="n">${r.calib.n[sk]}</td><td class="n">${fmt(r.calib.real[sk])}</td><td class="n">${estOf(sk) > 0 ? fmt(estOf(sk)) : '<span class="qs-dim">–</span>'}</td><td class="n qs-dim">${r.calib.low[sk].toFixed(2)}–${r.calib.high[sk].toFixed(2)}</td><td class="n"><b>×${factorShown(sk).toFixed(2)}</b></td>${matchCell(r.calib.real[sk], estOf(sk))}</tr>`).join('')}
           <tr style="border-top:1px solid #2b2b3a;"><td><b>Total</b></td><td></td><td class="n"><b>${fmt(calibTotal.real)}</b></td><td class="n">${calibTotal.est > 0 ? `<b>${fmt(calibTotal.est)}</b>` : '<span class="qs-dim">–</span>'}</td><td></td><td></td>${matchCell(calibTotal.real, calibTotal.est)}</tr>
         </tbody></table></div>` : '<div class="qs-dim" style="color:#fca5a5;">No recent plays of these maps: nothing to match against.</div>'}
@@ -1207,7 +1311,7 @@ export const mount = (meta, host) => {
       <div class="qs-card"><div class="qs-h">Queue as read</div>
         <div class="qs-dim" style="margin-bottom:4px;">From the dock: ${queue.entries.length} map${queue.entries.length === 1 ? '' : 's'}${queue.label ? `, "${esc(queue.label)}"` : ''}.</div>
         <div class="qs-tablewrap" style="max-height:200px;"><table><thead><tr><th>#</th><th>Map</th><th class="n">Id</th><th class="n">Rate</th><th class="n">Repeat</th><th class="n">Tries</th></tr></thead><tbody>
-          ${queue.entries.map((e, i) => `<tr><td class="qs-dim">${i + 1}</td><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${e.beatmapId}</td><td class="n">${e.lockedRate ?? `${ctx.rate} (yours)`}×</td><td class="n">${e.repeat}${e.played ? ` (${e.played} started)` : ''}</td><td class="n" title="${r.triesFrom && r.triesFrom[e.beatmapId] === 'server' ? `from the server; this computer's plays count ${num(r.memoryLocal[e.beatmapId]).toFixed(1)}` : 'counted from this computer\'s plays: the server didn\'t answer'}">${num(r.memory[e.beatmapId]).toFixed(1)}${r.triesFrom && r.triesFrom[e.beatmapId] === 'server' ? '' : ' <span class="qs-dim">local</span>'}</td></tr>`).join('')}
+          ${queue.entries.map((e, i) => `<tr><td class="qs-dim">${i + 1}</td><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${e.beatmapId}</td><td class="n">${e.lockedRate ?? `${ctx.rate} (yours)`}×</td><td class="n">${e.repeat}${e.played ? ` (${e.played} started)` : ''}</td><td class="n" title="${r.triesFrom && r.triesFrom[e.beatmapId] === 'server' ? `from the server` : 'counted from this computer\'s plays: the server didn\'t answer'}">${num(r.memory[e.beatmapId]).toFixed(1)}${r.triesFrom && r.triesFrom[e.beatmapId] === 'server' ? '' : ' <span class="qs-dim">local</span>'}</td></tr>`).join('')}
         </tbody></table></div>
       </div>`;
     const debugPlays = debugLimit > 0 ? r.plays.slice(0, debugLimit) : r.plays;
@@ -1228,10 +1332,8 @@ export const mount = (meta, host) => {
     }).join('');
     // one map at a time: its plays through the forecast, and its XP per play by skill
     const mapIds = [...new Set(queue.entries.map(e => e.beatmapId))];
-    debugMap = Math.min(Math.max(0, debugMap), mapIds.length - 1);
-    let mapCard = '';
-    if (debugView === 'cards' && mapIds.length) {
-      const id = mapIds[debugMap];
+    /** One map's card: its XP per play over the forecast, mindblock, bonuses and level-ups. */
+    const cardOf = (id) => {
       const entry = queue.entries.find(e => e.beatmapId === id);
       const own = r.plays.map((p, i) => ({ p, i })).filter(({ p }) => queue.entries[p.entry].beatmapId === id);
       const skillsHere = SKILLS.filter(sk => own.some(({ p }) => xpOf(p, sk) > 0));
@@ -1242,55 +1344,35 @@ export const mount = (meta, host) => {
       const ups = own.flatMap(({ p }) => p.ups || []);
       // the chart: XP per play over the forecast, a line per skill
       const COLORS = ['#60a5fa', '#f0883e', '#4ade80', '#c084fc', '#facc15', '#f87171', '#22d3ee', '#fb7185', '#a3e635', '#e879f9', '#94a3b8'];
-      const Wc = 760, Hc = 150, pad = 4;
+      const Wc = 760, Hc = 90, pad = 4;
       const maxXp = Math.max(1, ...own.flatMap(({ p }) => skillsHere.map(sk => xpOf(p, sk))));
       const xAt = (t) => pad + (t / Math.max(1, spanH * 3600)) * (Wc - 2 * pad);
       const yAt = (v) => Hc - pad - (v / maxXp) * (Hc - 2 * pad - 10);
       const lines = skillsHere.map((sk, k) => {
         const pts = own.map(({ p }) => `${xAt(p.start).toFixed(1)},${yAt(xpOf(p, sk)).toFixed(1)}`).join(' ');
         return `<polyline points="${pts}" fill="none" stroke="${COLORS[k % COLORS.length]}" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`
-          + (own.length <= 40 ? own.map(({ p }) => `<circle cx="${xAt(p.start).toFixed(1)}" cy="${yAt(xpOf(p, sk)).toFixed(1)}" r="2" fill="${COLORS[k % COLORS.length]}"><title>${SKILL_NAMES[sk]} at ${clock(p.start)}: ${fmt(xpOf(p, sk))}</title></circle>`).join('') : '');
+          + (own.length <= 40 ? own.map(({ p }) => `<circle cx="${xAt(p.start).toFixed(1)}" cy="${yAt(xpOf(p, sk)).toFixed(1)}" r="2" fill="${COLORS[k % COLORS.length]}"><title>${SKILL_NAMES[sk]} at ${clock(p.start)}: ${fmt(xpOf(p, sk))}${MINDBLOCK.has(sk) ? ` · mindblock ×${num(p.block ?? 1).toFixed(2)}` : ''}</title></circle>`).join('') : '');
       }).join('');
       const upMarks = own.filter(({ p }) => p.ups && p.ups.length).map(({ p }) => `<line x1="${xAt(p.end).toFixed(1)}" x2="${xAt(p.end).toFixed(1)}" y1="0" y2="${Hc}" stroke="#4ade80" stroke-dasharray="2 3" opacity=".5"><title>${p.ups.map(u => `${SKILL_NAMES[u.skill]} ${u.level}`).join(', ')}</title></line>`).join('');
       const hourLines = [];
       for (let h = 1; h * 3600 < spanH * 3600; h += spanH > 8 ? 2 : 1) hourLines.push(`<line x1="${xAt(h * 3600)}" x2="${xAt(h * 3600)}" y1="0" y2="${Hc}" stroke="#23232f"/><text x="${xAt(h * 3600) + 2}" y="${Hc - 3}" fill="#6b7280" font-size="9">${h}H</text>`);
       const legend = skillsHere.map((sk, k) => `<span style="display:inline-flex; align-items:center; gap:4px; margin-right:10px;"><i style="display:inline-block; width:10px; height:3px; border-radius:2px; background:${COLORS[k % COLORS.length]};"></i>${SKILL_NAMES[sk]}</span>`).join('');
-      mapCard = `
-        <div class="qs-card" style="background:#101018;">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <div style="font-weight:700; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(entry.title)}">${esc(entry.title)}</div>
-            <div class="qs-pager" style="margin-left:auto;">
-              <button type="button" class="qs-map-page" data-step="-1" ${debugMap === 0 ? 'disabled' : ''} title="Previous map">‹</button>
-              <span>${debugMap + 1}/${mapIds.length}</span>
-              <button type="button" class="qs-map-page" data-step="1" ${debugMap === mapIds.length - 1 ? 'disabled' : ''} title="Next map">›</button>
-            </div>
-          </div>
-          <div class="qs-dim" style="margin:2px 0 8px;">Id ${id} · ${entry.lockedRate ?? `${ctx.rate} (yours)`}× · repeat ${entry.repeat} · Tries now ${num(r.memory[id]).toFixed(1)}</div>
+      return `
+        <div class="qs-card" style="background:#101018; margin:2px 0 6px 16px;">
           ${own.length ? `
           <div class="qs-facts" style="margin-bottom:8px;">
-            <span class="qs-dim">Plays</span><span><b>${own.length}</b> in the next ${durH(spanH * 3600)}</span>
-            <span class="qs-dim">XP</span><span><b>${fmt(sum)}</b> in all, <b>${fmt(sum / own.length)}</b> a play on average</span>
+            <span class="qs-dim">A play</span><span><b>${fmt(sum / own.length)}</b> on average</span>
             <span class="qs-dim">Over time</span><span>${fmt(firstT)} on its first play, ${fmt(lastT)} on its last (<span style="color:${change >= 0 ? '#4ade80' : '#f87171'}">${change >= 0 ? '+' : ''}${Math.round(change * 100)}%</span>)</span>
+            ${skillsHere.some(sk => MINDBLOCK.has(sk)) ? `<span class="qs-dim">Mindblock</span><span>×${num(own[0].p.block ?? 1).toFixed(2)} on its first play, ×${num(own[own.length - 1].p.block ?? 1).toFixed(2)} on its last</span>` : ''}
+            <span class="qs-dim">Bonuses</span><span>${medals.ok ? `medals ×${medals.multiplier.toFixed(3)}` : 'medals unknown'}${skillsHere.filter(sk => geneOf(sk) > 1).length ? ` · genetics ${skillsHere.filter(sk => geneOf(sk) > 1).map(sk => `${SKILL_SHORT[sk]} ×${geneOf(sk).toFixed(2)}`).join(', ')}` : ''}</span>
             ${ups.length ? `<span class="qs-dim">Level-ups</span><span class="qs-up">${ups.map(u => `${SKILL_NAMES[u.skill]} ${u.level}`).join(', ')}</span>` : ''}
           </div>
           <div class="qs-dim" style="margin-bottom:4px;">${legend}</div>
           <svg viewBox="0 0 ${Wc} ${Hc}" width="100%" height="${Hc}" preserveAspectRatio="none" style="display:block; background:#0b0b11; border-radius:4px; margin-bottom:8px;">${hourLines.join('')}${upMarks}${lines}</svg>
-          <div class="qs-tablewrap" style="max-height:260px;"><table>
-            <thead><tr><th class="n">#</th><th class="n">Starts</th><th class="n">Strain in</th><th class="n">Tries</th><th class="n">Strain</th><th class="n">Bar after</th>${skillsHere.map(sk => `<th class="n">${SKILL_NAMES[sk]}</th>`).join('')}<th class="n">Total</th><th>Sim</th></tr></thead>
-            <tbody>${own.map(({ p, i }, n) => {
-              const prev = own[n - 1];
-              const d = prev ? totalOf(p) - totalOf(prev.p) : 0;
-              return `<tr>
-                <td class="n qs-dim">${i + 1}</td><td class="n">${clock(p.start)}</td><td class="n">${shortTime(p.before)}</td><td class="n">${p.tries.toFixed(1)}</td>
-                <td class="n">${shortTime(p.strained)}</td><td class="n">${(p.bar * 100).toFixed(0)}%</td>
-                ${skillsHere.map(sk => `<td class="n" title="simulator: ${fmt(num(p.xp[sk]))}">${fmt(xpOf(p, sk))}</td>`).join('')}
-                <td class="n"><b>${fmt(totalOf(p))}</b>${prev && Math.abs(d) >= 0.5 ? ` <span style="font-size:10px; color:${d > 0 ? '#4ade80' : '#f87171'}">${d > 0 ? '+' : '−'}${fmt(Math.abs(d))}</span>` : ''}</td>
-                <td><span class="qs-pill ${p.fresh ? 'new' : 'hit'}">${p.fresh ? 'new' : 'cache'}</span>${p.passed ? '' : ' <span style="color:#fca5a5; font-weight:700;">fail</span>'}${p.ups && p.ups.length ? ` <span class="qs-up">${p.ups.map(u => `${SKILL_SHORT[u.skill]} ${u.level}`).join(', ')} ↑</span>` : ''}</td>
-              </tr>`;
-            }).join('')}</tbody>
-          </table></div>` : `<div class="qs-dim">Not played within the next ${durH(spanH * 3600)}.</div>`}
+          ` : `<div class="qs-dim">Not played within the next ${durH(spanH * 3600)}.</div>`}
         </div>`;
-    }
+    };
+
     // ---- Diagnostics: a health line per input, and everything as text to paste (no character id or name) ----
     const diag = (() => {
       const st = r.simStats || { ms: 0, slowest: 0, busy: 0, failed: 0 };
@@ -1328,7 +1410,7 @@ export const mount = (meta, host) => {
       lines.push(`Queue: ${queue.entries.length} maps · read from ${queue.from || '?'}${queue.label ? ` · "${queue.label}"` : ''} · key ${queueKey(queue.entries).join('|')}`);
       for (const id of [...new Set(queue.entries.map(e => e.beatmapId))]) {
         const e = queue.entries.find(x => x.beatmapId === id);
-        lines.push(`  ${id} ${e.title.slice(0, 40)} · ×${e.lockedRate ?? ctx.rate}${e.lockedMods && e.lockedMods.length ? ` ${e.lockedMods.join('')}` : ''} · rep ${e.repeat} played ${e.played} · Tries ${num(r.memory[id]).toFixed(1)} (${(r.triesFrom || {})[id] || '?'}; local ${num((r.memoryLocal || {})[id]).toFixed(1)}) · last day ${num((r.recentByMap || {})[id])} plays · real plays ${num(((r.localSummary || {}).perMap || {})[id])}`);
+        lines.push(`  ${id} ${e.title.slice(0, 40)} · ×${e.lockedRate ?? ctx.rate}${e.lockedMods && e.lockedMods.length ? ` ${e.lockedMods.join('')}` : ''} · rep ${e.repeat} played ${e.played} · Tries ${num(r.memory[id]).toFixed(1)} (${(r.triesFrom || {})[id] || '?'}) · last day ${num((r.recentByMap || {})[id])} plays · real plays ${num(((r.localSummary || {}).perMap || {})[id])}`);
       }
       lines.push(`Simulator: ${r.counts().calls} new · ${r.counts().fromCache} cached · ${st.busy} busy (retried) · ${st.failed} failed · avg ${r.counts().calls ? Math.round(st.ms / Math.max(1, r.counts().calls)) : 0}ms · slowest ${(st.slowest / 1000).toFixed(1)}s · scan ${((r.scanMs || 0) / 1000).toFixed(1)}s`);
       lines.push(`Forecast: ${r.plays.length} plays over ${dur(spanH * 3600)} · loop ${r.loopSec ? `${r.loopPlays} plays in ${dur(r.loopSec)}` : '–'} · mindblock window ${num(r.recentStart)} plays at start`);
@@ -1344,7 +1426,7 @@ export const mount = (meta, host) => {
       <div class="qs-card" style="margin-bottom:10px;">
         <div class="qs-row" style="margin-bottom:6px;"><div class="qs-h" style="margin:0;">Diagnostics</div>
           <span class="qs-dim">Something looks wrong? Copy this and send it to Rai.</span>
-          <button type="button" class="qs-plain qs-diag-copy" style="margin-left:auto;">Copy diagnostics</button>
+          <button type="button" class="qs-plain qs-diag-copy" style="margin-left:auto;" title="Diagnostics, the forecast plays and your recent real plays, in one">Copy Diagnostics</button>
           <button type="button" class="qs-plain qs-diag-console">Open in console</button></div>
         <div class="qs-diag">${diag.health.map(([k, state, v]) => `<span title="${esc(v)}"><i style="background:${DOT[state]}"></i><b>${k}</b> ${esc(v)}</span>`).join('')}</div>
       </div>`;
@@ -1357,13 +1439,12 @@ export const mount = (meta, host) => {
             <button type="button" class="qs-view" data-view="table" style="width:auto; padding:0 8px; font-size:11px;${debugView === 'table' ? ' background:#4f46e5; border-color:#4f46e5;' : ''}">Table</button>
             <button type="button" class="qs-view" data-view="cards" style="width:auto; padding:0 8px; font-size:11px;${debugView === 'cards' ? ' background:#4f46e5; border-color:#4f46e5;' : ''}">Cards</button>
           </div>
-          <span class="qs-dim">${debugView === 'cards' ? 'One map at a time: its XP per play over the forecast.' : 'XP after calibration. Hover a number for the simulator\'s own; hover strain or Tries for the step it was simulated at.'}</span>
-          ${debugView === 'table' ? `<span class="qs-dim" style="margin-left:auto;">Show</span>
+          <span class="qs-dim">${'XP with mindblock, medals and genetics. Hover a number for the simulator\'s own; hover strain or Tries for its step.'}</span>
+          ${true ? `<span class="qs-dim" style="margin-left:auto;">Show</span>
           <select class="qs-debug-limit"><option value="50"${debugLimit === 50 ? ' selected' : ''}>first 50 plays</option><option value="200"${debugLimit === 200 ? ' selected' : ''}>first 200 plays</option><option value="0"${debugLimit === 0 ? ' selected' : ''}>all ${r.plays.length} plays</option></select>` : '<span style="margin-left:auto;"></span>'}
           <button type="button" class="qs-plain qs-console" title="Your recent plays as the game stored them, and the calibration play by play">Console</button>
-          <button type="button" class="qs-plain qs-copy">Copy as text</button>
         </div>
-        ${debugView === 'cards' ? mapCard : `<div class="qs-tablewrap"><table>
+        ${debugView === 'cards' && mapIds.length ? (() => { debugMap = Math.min(Math.max(0, debugMap), mapIds.length - 1); const e = queue.entries.find(x => x.beatmapId === mapIds[debugMap]); return `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;"><b style="color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${esc(e.title)}">${esc(e.title)}</b><span class="qs-dim">Id ${e.beatmapId} · ${e.lockedRate ?? `${ctx.rate} (yours)`}× · repeat ${e.repeat} · Tries now ${num(r.memory[e.beatmapId]).toFixed(1)}</span><div class="qs-pager" style="margin-left:auto;"><button type="button" class="qs-map-page" data-step="-1" ${debugMap === 0 ? 'disabled' : ''} title="Previous map">‹</button><span>${debugMap + 1}/${mapIds.length}</span><button type="button" class="qs-map-page" data-step="1" ${debugMap === mapIds.length - 1 ? 'disabled' : ''} title="Next map">›</button></div></div>${cardOf(e.beatmapId)}`; })() : `<div class="qs-tablewrap"><table>
           <thead><tr><th>#</th><th>Map</th><th class="n">Starts</th><th class="n">Strain in</th><th class="n">Tries</th><th class="n">Strain / Length</th><th class="n">Bar after</th><th class="n" title="Mindblock: how many of the last 50 plays were this map, and the XP left on the skills it cuts">Mindblock</th>${SKILLS.map(sk => `<th class="n" title="${SKILL_NAMES[sk]}">${SKILL_SHORT[sk]}</th>`).join('')}<th class="n">Total</th><th>Sim</th></tr></thead>
           <tbody>${debugRows}</tbody>
         </table></div>`}
@@ -1377,7 +1458,7 @@ export const mount = (meta, host) => {
       lines.push(`Simulator\t${asked} new\t${reused} reused\tRuns\t${r.runs || 1}\tForecast\t${r.plays.length} plays\t${dur(spanH * 3600)}`);
       lines.push(`Medals\t${medals.ok ? `x${medals.multiplier.toFixed(4)}\t${medals.held} held\t${medals.unknown} unknown` : 'server not reached'}\tRecent plays at start\t${num(r.recentStart)}`);
       lines.push('');
-      lines.push(['Calibration', 'Plays', 'Real', 'With your bonuses', 'Factor', 'Match'].join('\t'));
+      lines.push(['Calibration', 'Plays', 'Real', 'With bonuses', 'Factor', 'Match'].join('\t'));
       for (const sk of calibSkills) lines.push([SKILL_NAMES[sk], r.calib.n[sk], Math.round(r.calib.real[sk]), Math.round(estOf(sk)), factorShown(sk).toFixed(3), estOf(sk) > 0 ? matchText(r.calib.real[sk] / estOf(sk)) : '-'].join('\t'));
       lines.push('');
       lines.push(['#', 'Map', 'Id', 'Rate', 'Repeat', 'Started', 'Tries', 'Tries from', 'Local Tries'].join('\t'));
@@ -1396,9 +1477,20 @@ export const mount = (meta, host) => {
       <div class="qs-tabs">${available.map(([id, label]) => `<button type="button" data-tab="${id}" class="${id === activeTab ? 'on' : ''}">${label}</button>`).join('')}</div>
       ${content}`;
 
+    // the next upgrade's label under a bar: when it would cover one of the bar's level marks (the 100 at its start,
+    // say), it moves above the bar instead
+    for (const lbl of outEl.querySelectorAll('.qs-lv-uplbl.below')) {
+      const bar = lbl.closest('.qs-lv-bar'), r = lbl.getBoundingClientRect();
+      const hits = [...bar.querySelectorAll('.qs-lv-tk')].some(t => { const q = t.getBoundingClientRect(); return q.width && r.left < q.right + 2 && r.right > q.left - 2; });
+      if (hits) { lbl.classList.replace('below', 'above'); bar.classList.add('ups'); }
+    }
     for (const tr of outEl.querySelectorAll('.qs-lv-row')) {
       tr.onclick = () => { const k = tr.dataset.skill; if (levelsOpen.has(k)) levelsOpen.delete(k); else levelsOpen.add(k); renderResult(...lastResult); centerVertically(); };
     }
+    const viewSel = outEl.querySelector('#qs-lv-view');
+    if (viewSel) viewSel.onchange = () => { if (!viewSel.value) return; levelsView = viewSel.value; savePrefs(); renderResult(...lastResult); };
+    const routesBox = outEl.querySelector('#qs-lv-routes');
+    if (routesBox) routesBox.onchange = () => { useRoutes = routesBox.checked; if (useRoutes) levelsView = 'regular'; savePrefs(); renderResult(...lastResult); };
     const localList = outEl.querySelector('.qs-local-list');
     if (localList) localList.addEventListener('toggle', () => { localOpen = localList.open; centerVertically(); });
     for (const btn of outEl.querySelectorAll('.qs-tabs button')) {
@@ -1409,44 +1501,43 @@ export const mount = (meta, host) => {
     for (const btn of outEl.querySelectorAll('.qs-page')) {
       btn.onclick = () => { svPage += Number(btn.dataset.step); renderResult(...lastResult); };
     }
-    for (const btn of outEl.querySelectorAll('.qs-view')) {
-      btn.onclick = () => { debugView = btn.dataset.view; renderResult(...lastResult); };
-    }
-    for (const btn of outEl.querySelectorAll('.qs-map-page')) {
-      btn.onclick = () => { debugMap += Number(btn.dataset.step); renderResult(...lastResult); };
-    }
+    for (const btn of outEl.querySelectorAll('.qs-view')) btn.onclick = () => { debugView = btn.dataset.view; renderResult(...lastResult); };
+    for (const btn of outEl.querySelectorAll('.qs-map-page')) btn.onclick = () => { debugMap += Number(btn.dataset.step); renderResult(...lastResult); };
     const limitBox = outEl.querySelector('.qs-debug-limit');
     if (limitBox) limitBox.onchange = () => { debugLimit = Number(limitBox.value) || 0; renderResult(...lastResult); };
+    const titles = Object.fromEntries(queue.entries.map(e => [e.beatmapId, e.title]));
+    // maps outside the queue: their names from the game's catalog
+
+    /** The character's last 100 plays as the game stored them, newest first. */
+    const loadPlayed = async () => {
+      for (const [id, t] of Object.entries(await mapNames())) if (!titles[id]) titles[id] = t;
+      let rows = [];
+      let note = '';
+      try {
+        rows = (await gameRows('SELECT x.playedAt AS playedAt, x.beatmapId AS beatmapId, x.gains AS gains, s.rate AS rate, s.mods AS mods, s.accuracy AS accuracy, s.pp AS pp FROM score_xp x LEFT JOIN score s ON s.id = x.scoreId WHERE x.characterId = ? ORDER BY x.playedAt DESC LIMIT 100', [num(ctx.row.id)])) || [];
+      } catch (e) {
+        note = `The game keeps no per-play XP here (${e && e.message ? e.message : e}).`;
+      }
+      const ats = rows.map(x => num(x.playedAt));
+      const played = rows.map(x => {
+        const g = parseGains(x.gains);
+        return {
+          Time: new Date(num(x.playedAt)).toLocaleString(), Map: `#${x.beatmapId}${titles[x.beatmapId] ? ` ${titles[x.beatmapId]}` : ''}`, Rate: num(x.rate) || 1, Mods: x.mods || '',
+          'Acc %': x.accuracy !== null && x.accuracy !== undefined ? `${(num(x.accuracy) * (num(x.accuracy) <= 1 ? 100 : 1)).toFixed(2)}%` : '', pp: Math.round(num(x.pp)),
+          ...Object.fromEntries(SKILLS.map(sk => [SKILL_NAMES[sk], Math.round(num(g[sk]))])),
+        };
+      });
+      return { played, ats, note, newest: ats.length ? Math.max(...ats) : 0 };
+    };
     const consoleBtn = outEl.querySelector('.qs-console');
     if (consoleBtn) {
       consoleBtn.onclick = async () => {
-        const titles = Object.fromEntries(queue.entries.map(e => [e.beatmapId, e.title]));
-        /** The character's last 100 plays as the game stored them, newest first. */
-        const loadPlayed = async () => {
-          let rows = [];
-          let note = '';
-          try {
-            rows = (await gameRows('SELECT x.playedAt AS playedAt, x.beatmapId AS beatmapId, x.gains AS gains, s.rate AS rate, s.mods AS mods, s.accuracy AS accuracy, s.pp AS pp FROM score_xp x LEFT JOIN score s ON s.id = x.scoreId WHERE x.characterId = ? ORDER BY x.playedAt DESC LIMIT 100', [num(ctx.row.id)])) || [];
-          } catch (e) {
-            note = `The game keeps no per-play XP here (${e && e.message ? e.message : e}).`;
-          }
-          const ats = rows.map(x => num(x.playedAt));
-          const played = rows.map(x => {
-            const g = parseGains(x.gains);
-            return {
-              Time: new Date(num(x.playedAt)).toLocaleString(), Map: titles[x.beatmapId] || `#${x.beatmapId}`, Rate: num(x.rate) || 1, Mods: x.mods || '',
-              'Acc %': x.accuracy !== null && x.accuracy !== undefined ? `${(num(x.accuracy) * (num(x.accuracy) <= 1 ? 100 : 1)).toFixed(2)}%` : '', pp: Math.round(num(x.pp)),
-              ...Object.fromEntries(SKILLS.map(sk => [SKILL_NAMES[sk], Math.round(num(g[sk]))])),
-            };
-          });
-          return { played, ats, note, newest: ats.length ? Math.max(...ats) : 0 };
-        };
         const calibRows = r.calib && r.calib.detail.length ? r.calib.detail.map(d => ({
           Time: new Date(d.playedAt).toLocaleString(), Map: d.title, Rate: d.rate, Mods: d.mods, 'Tries then': +d.tries.toFixed(2), 'Recent then': d.recentThen, Mindblock: +num(d.block ?? 1).toFixed(3),
           ...Object.fromEntries(SKILLS.filter(sk => r.calib.detail.some(x => num(x.real[sk]) > 0 || num(x.sim[sk]) > 0)).flatMap(sk => [[`${SKILL_SHORT[sk]} real`, Math.round(num(d.real[sk]))], [`${SKILL_SHORT[sk]} sim`, Math.round(num(d.sim[sk]))]])),
         })) : [];
         const calibSummary = r.calib ? Object.keys(r.calib.n).map(sk => ({
-          Skill: SKILL_NAMES[sk], Plays: r.calib.n[sk], Real: Math.round(r.calib.real[sk]), 'With your bonuses': medals.ok ? Math.round(r.calib.sim[sk] * medals.multiplier) : '',
+          Skill: SKILL_NAMES[sk], Plays: r.calib.n[sk], Real: Math.round(r.calib.real[sk]), 'With bonuses': medals.ok ? Math.round(r.calib.sim[sk] * medals.multiplier) : '',
           Factor: +((r.calib.factors[sk] ?? r.calib.ignored[sk]) || 0).toFixed(3), Match: medals.ok && r.calib.sim[sk] > 0 ? matchText(r.calib.real[sk] / (r.calib.sim[sk] * medals.multiplier)) : '',
         })) : [];
         void openConsole({ loadPlayed, calibRows, calibSummary, diag });
@@ -1455,20 +1546,21 @@ export const mount = (meta, host) => {
     const diagCopy = outEl.querySelector('.qs-diag-copy');
     if (diagCopy) {
       diagCopy.onclick = async () => {
-        diagCopy.textContent = (await copyText(diag.text)) ? 'Copied' : 'Copy failed';
-        setTimeout(() => { if (diagCopy.isConnected) diagCopy.textContent = 'Copy diagnostics'; }, 1500);
+        const recent = await loadPlayed();
+        const text = `${diag.text}
+
+== Forecast plays ==
+${debugText()}
+
+== Recent real plays ==
+${recent.note ? `${recent.note}
+` : ''}${tsv(recent.played)}`;
+        diagCopy.textContent = (await copyText(text)) ? 'Copied' : 'Copy failed';
+        setTimeout(() => { if (diagCopy.isConnected) diagCopy.textContent = 'Copy Diagnostics'; }, 1500);
       };
     }
     const diagConsole = outEl.querySelector('.qs-diag-console');
     if (diagConsole && consoleBtn) diagConsole.onclick = () => { consoleView = 'diag'; consoleBtn.onclick(); };
-    const copyBtn = outEl.querySelector('.qs-copy');
-    if (copyBtn) {
-      copyBtn.onclick = async () => {
-        const ok = await copyText(debugText());
-        copyBtn.textContent = ok ? 'Copied' : 'Copy failed';
-        setTimeout(() => { if (copyBtn.isConnected) copyBtn.textContent = 'Copy as text'; }, 1500);
-      };
-    }
   };
 };
 

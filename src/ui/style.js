@@ -44,6 +44,15 @@ export const CSS = `
 #qs-window .qs-lv-cell:last-child .qs-lv-seg { border-top-right-radius:5px; border-bottom-right-radius:5px; }
 #qs-window .qs-lv-seg > i { position:absolute; top:0; bottom:0; left:0; background:var(--qs-now); }
 #qs-window .qs-lv-seg > i.gain { opacity:.45; }
+/* an upgrade bought on the route: a thin amber line on the bar */
+/* the next upgrade's number and time: under the bar, or above it near the bar's start (the bar then makes room) */
+#qs-window .qs-lv-bar.ups { padding-top:14px; }
+#qs-window .qs-lv-bar.ups > .qs-lv-tk.first { top:25px; }
+#qs-window .qs-lv-cell { position:relative; }
+#qs-window .qs-lv-uplbl { position:absolute; margin-left:2px; font-size:9px; line-height:11px; color:#fbbf24; font-weight:600; white-space:nowrap; cursor:help; z-index:1; }
+#qs-window .qs-lv-uplbl.above { top:-12px; }
+#qs-window .qs-lv-uplbl.below { top:11px; }
+#qs-window .qs-lv-seg > b.qs-lv-up { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:#fbbf24; cursor:help; }
 #qs-window .qs-lv-tk { align-self:flex-end; font-size:10px; color:#6b7280; white-space:nowrap; margin-top:2px; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 #qs-window .qs-lv-tk.time { color:#c7d2fe; }
 #qs-window .qs-lv-tk.goal { color:var(--qs-prestige); }
@@ -178,8 +187,13 @@ export const CSS = `
 #qs-window .qs-h { font-weight:700; color:#fff; margin-bottom:2px; }
 #qs-window .qs-dim { color:#9ca3af; font-size:11px; }
 #qs-window .qs-bar { position:relative; height:24px; margin:22px 2px 26px; }
-#qs-window .qs-bar-labels { display:flex; justify-content:flex-end; align-items:baseline; gap:8px; font-weight:700; font-size:14px; margin-top:6px; }
+#qs-window .qs-bar-labels { position:relative; height:20px; font-weight:700; font-size:14px; margin-top:6px; }
+#qs-window .qs-bar-labels > .qs-state { position:absolute; bottom:0; display:flex; align-items:baseline; gap:8px; white-space:nowrap; }
+#qs-window .qs-bar.sliding .qs-arrow, #qs-window .qs-bar.sliding .qs-endline, #qs-window .qs-bar.sliding .qs-arrow-label, #qs-window .qs-bar.sliding .qs-hour-label, #qs-window .qs-bar.sliding .qs-loss-label { display:none; }
 #qs-window .qs-bar-labels .qs-trend { font-size:13px; letter-spacing:-2px; }
+#qs-window .qs-state > .qs-trend { position:absolute; bottom:0; }
+#qs-window .qs-state > .qs-trend.side-r { left:calc(100% + 8px); }
+#qs-window .qs-state > .qs-trend.side-l { right:calc(100% + 8px); }
 #qs-window .qs-track { position:absolute; left:0; right:0; top:10px; height:6px; border-radius:3px;
   background:linear-gradient(90deg, #4f9cf5 0%, #6fb8c9 22%, #d9c64b 40%, #e8c147 60%, #f0883e 80%, #b48cff 100%); }
 #qs-window .qs-tick { position:absolute; top:5px; width:2px; height:16px; background:#e5e7eb; border-radius:1px; }

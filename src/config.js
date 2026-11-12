@@ -11,8 +11,8 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.3.511';
-export const VERSION_ID = '2026-11-12 06H50M';
+export const VERSION = '1.3.525';
+export const VERSION_ID = '2026-11-12 18H17M';
 
 // none / info / urgent
 export const NOTICE = {
@@ -41,14 +41,13 @@ export const CHANGELOG = {
 export const HOTFIXES = {
   id: VERSION_ID,
   text: `v${VERSION} · 12 Nov 2026
-• Hour marks on the strain arrow now sit in the right place
-• Window stays solid while you edit the queue next to it
-• Hotfixes now have their own button
-• Clicks pass through to the mods menu, options and Add-ons
-• Chat shows through the window when you point at it
-• Esc closes an open menu or the chat first
-• Opening the Window options no longer moves the window
-• Fixed window fading when opened under the mouse`,
+• Levels: follow your routes from Gemini's level up sim
+• Levels: Overall display, next upgrade on the bar
+• Levels update by themselves after an upgrade
+• Strain bar: slider starts off, tidier arrow and labels
+• Overview: the top 3 skills this queue trains
+• Debug: Copy Diagnostics, map names in the console
+• Fixed chat scrolling, Speed Jam / Memory strain and Tries`,
 };
 
 // ---------------------------------------------------------------------
@@ -203,6 +202,24 @@ export const TEXT = {
     legendProgress: 'Progress',
     legendComplete: 'Level up',
     legendPrestige: 'Prestige',
+    legendUpgrade: 'Upgrade',
+    display: 'Display',
+    viewRegular: 'Regular',
+    viewOverall: 'Overall',
+    viewRegularRoute: 'Regular + route',
+    viewOverallRoute: 'Overall + route',
+    useRoutes: 'Use routes',
+    useRoutesTip: 'Gemini\'s level up sim is installed: its routes can be followed here. Upgrades are bought at your routes\' levels, and XP comes faster after each one.',
+    introOverall: 'Each skill\'s overall level, as on your profile. Click one for more information.',
+    introRoute: 'Upgrades are bought along your routes.',
+    nextLevel: 'Next level',
+    barOverall: 'Level progress',
+    nextUpgrade: 'Next upgrade',
+    upgradesLeft: 'Upgrades to go',
+    upgradeAt: 'Upgrade #{k} at Lv {lv}',
+    upgradeNow: 'now',
+    routeDone: 'route done',
+    noRoute: 'no route for P{p}',
   },
   matchHelp: 'How close the add-on is to what you really earned on these plays. 100% is a perfect match.',
 };
