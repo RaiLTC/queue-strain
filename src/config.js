@@ -11,8 +11,8 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.3.52';
-export const VERSION_ID = '2026-11-12 05H42M';
+export const VERSION = '1.3.53';
+export const VERSION_ID = '2026-11-12 05H49M';
 
 // none / info / urgent
 export const NOTICE = {
@@ -27,6 +27,7 @@ export const CHANGELOG = {
   text: `v${VERSION} · 12 Nov 2026
 • Fixed window fading when opened under the mouse
 • Opening the Window options no longer moves the window
+• Window turns see-through when clicking through to the mods menu
 
 v1.3.5
 • Strain bar shows where you're headed, with a time slider
@@ -126,8 +127,8 @@ export const TEXT = {
     outsideClose: 'Closes it (the game ignores the click)',
     outsideThrough: 'Closes it (the game gets the click too)',
     outsideStay: 'Nothing',
-    modsPass: 'Click through to the mods menu',
-    modsPassTip: 'While editing the queue with the mods menu open, clicks go through this window to the game, so the menu can be used even under it.',
+    modsPass: 'Click through when mods menu is open',
+    modsPassTip: 'While editing the queue with the mods menu open, this window turns see-through (as much as the fade slider says) and clicks go through it to the game, so the menu can be used even under it.',
   },
   status: {
     simulating: 'Simulating the queue…',
