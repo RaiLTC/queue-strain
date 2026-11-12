@@ -1,7 +1,7 @@
 // The window: mount, the options, scanning, and every tab.
 
 import { SETTINGS, TEXT, VERSION, VERSION_ID, tx } from '../config.js';
-import { cached, forecast, localPlaysOf, parseGains, saveCache, svCurves } from '../forecast.js';
+import { cached, forecast, localPlaysOf, modsText, parseGains, saveCache, svCurves } from '../forecast.js';
 import { MINDBLOCK, SKILLS, diagLog, gameRows, geneticsFor, logProblem, movedOn, num, queueKey, readQueue, setting } from '../game.js';
 import { BAR_ZONES, STAGES, STRAIN_CAP, XP_CUT, barKnots, barOf, gainLevels, levelOf, stageOf, warmup, xpForLevel } from '../rules/fatigue.js';
 import { fatigueGenesOf } from '../rules/genes.js';
@@ -57,6 +57,8 @@ export const mount = (meta, host) => {
 
   const $ = (sel) => root.querySelector(sel);
   const nowEl = $('#qs-now'), outEl = $('#qs-out'), statusEl = $('#qs-status'), scanBtn = $('#qs-scan');
+  /** The status line under the buttons, with what hovering it explains (nothing by default). */
+  const setStatus = (text, tip = '') => { statusEl.textContent = text; statusEl.title = tip; };
   const hoursInput = $('#qs-hours'), startInput = $('#qs-start'), runsInput = $('#qs-runs'), memTopInput = $('#qs-memplays-top'), autoBox = $('#qs-auto'), animBox = $('#qs-anim'), localInput = $('#qs-local');
   /** How many of the next plays of each Speed Jam / Memory map to show: set in that tab, 12 at first. */
   let memPlays = SETTINGS.memoryPlays;
@@ -110,7 +112,7 @@ export const mount = (meta, host) => {
     liveNewest = newest;
     // the first look only notes where the plays stand, unless one came in since the scan
     if (first && newest <= num(r.scannedAt)) return;
-    const local = await localPlaysOf(ctx.row, queue, ctx.rate, localCount());
+    const local = await localPlaysOf(ctx.row, queue, ctx.rate, localCount(), ctx.mods);
     if (lastResult[3] !== r || scanning) return;
     r.local = local;
     r.localAt = Date.now();
@@ -123,7 +125,7 @@ export const mount = (meta, host) => {
     savePrefs();
     if (!lastResult || scanning) return;
     const [queue, ctx, , r] = lastResult;
-    const local = await localPlaysOf(ctx.row, queue, ctx.rate, localCount());
+    const local = await localPlaysOf(ctx.row, queue, ctx.rate, localCount(), ctx.mods);
     if (lastResult[3] !== r || scanning) return;
     r.local = local;
     renderResult(...lastResult);
@@ -155,7 +157,7 @@ export const mount = (meta, host) => {
     if (same) {
       if (changedKey) {
         changedKey = null;
-        if (!scanning && nowEl.dataset.busy === 'Out of date: queue changed') { nowEl.classList.remove('qs-busy'); statusEl.textContent = TEXT.status.queueBack; }
+        if (!scanning && nowEl.dataset.busy === 'Out of date: queue changed') { nowEl.classList.remove('qs-busy'); setStatus(TEXT.status.queueBack); }
       }
       return;
     }
@@ -164,7 +166,7 @@ export const mount = (meta, host) => {
       if (!changedKey) {
         changedKey = key;
         if (!scanning) { nowEl.classList.add('qs-busy'); nowEl.dataset.busy = 'Out of date: queue changed'; }
-        statusEl.textContent = TEXT.status.queueChangedOff;
+        setStatus(TEXT.status.queueChangedOff);
       }
       return;
     }
@@ -172,7 +174,7 @@ export const mount = (meta, host) => {
     if (!changedKey || changedKey.join('|') !== key.join('|')) {
       changedKey = key;
       changedAt = now;
-      if (waitFor(scanKey, key) > 0) { statusEl.textContent = TEXT.status.queueChanged; return; }
+      if (waitFor(scanKey, key) > 0) { setStatus(TEXT.status.queueChanged); return; }
     }
     if (now - changedAt < waitFor(scanKey, key)) return;
     changedKey = null;
@@ -184,7 +186,7 @@ export const mount = (meta, host) => {
   runsInput.addEventListener('change', () => {
     runsInput.value = String(Math.min(5, Math.max(1, Math.round(parseFloat(runsInput.value) || SETTINGS.runsPerPlay))));
     savePrefs();
-    if (lastResult) statusEl.textContent = TEXT.status.newRuns;
+    if (lastResult) setStatus(TEXT.status.newRuns);
   });
   /** A new Memory plays count from that tab: only those curves again, mostly from the cache. */
   const setMemPlays = async (value) => {
@@ -198,12 +200,12 @@ export const mount = (meta, host) => {
     setScanning(true);
     try {
       r.sv = await svCurves(queue, r, memPlaysOf(), token, () => {
-        if (token === scanToken) statusEl.textContent = `Checking Speed Jam / Memory maps… ${r.counts().calls} sim calls`;
+        if (token === scanToken) setStatus(`Checking Speed Jam / Memory maps… ${r.counts().calls} sim calls`);
       });
       saveCache();
-      if (token === scanToken) { renderResult(queue, ctx, now, r); statusEl.textContent = `Speed Jam / Memory XP over the next ${memPlaysOf()} plays.`; }
+      if (token === scanToken) { renderResult(queue, ctx, now, r); setStatus(`Speed Jam / Memory XP over the next ${memPlaysOf()} plays.`); }
     } catch (e) {
-      if (!(e && e.message === 'stopped')) statusEl.textContent = `Failed: ${e && e.message ? e.message : e}`;
+      if (!(e && e.message === 'stopped')) setStatus(`Failed: ${e && e.message ? e.message : e}`);
     } finally {
       if (token === scanToken) setScanning(false);
     }
@@ -242,7 +244,7 @@ export const mount = (meta, host) => {
     saveCache();
     setScanning(false);
     if (nowEl.classList.contains('qs-busy')) nowEl.dataset.busy = 'Out of date: press Scan queue';
-    statusEl.textContent = why;
+    setStatus(why);
   };
   const hide = () => { closeConsole(); stopQueueWatch(); changedKey = null; if (scanning) autoPaused = true; stopScan(TEXT.status.closed); root.style.display = 'none'; };
   const shown = () => !!root && root.style.display === 'flex';
@@ -316,9 +318,9 @@ export const mount = (meta, host) => {
       outEl.innerHTML = '';
     }
     setScanning(true);
-    statusEl.textContent = why;
+    setStatus(why);
     const scanStarted = Date.now();
-    const fail = (msg) => { logProblem('scan', msg); if (token === scanToken) { outEl.innerHTML = `<div class="qs-err">${esc(msg)}</div>`; statusEl.textContent = ''; } };
+    const fail = (msg) => { logProblem('scan', msg); if (token === scanToken) { outEl.innerHTML = `<div class="qs-err">${esc(msg)}</div>`; setStatus(''); } };
     try {
       if (!api || typeof api.simulate !== 'function') throw new Error('This version of the game hands add-ons no simulator: update oss!idle.');
       let me = null;
@@ -355,23 +357,29 @@ export const mount = (meta, host) => {
       const hours = Math.min(24, Math.max(0.5, parseFloat(hoursInput.value) || SETTINGS.lookAheadHours));
       const ctx = {
         api, row, genes, geneSource, gear, startMinutes, hours, runs: parseInt(runsInput.value, 10) || SETTINGS.runsPerPlay,
-        onRetry: (n, of, pause) => { busyUntil = Date.now() + pause; busyNote = tx(TEXT.status.busyNote, { n, of }); statusEl.textContent = tx(TEXT.status.busy, { sec: Math.round(pause / 1000), n, of }); },
+        onRetry: (n, of, pause) => { busyUntil = Date.now() + pause; busyNote = tx(TEXT.status.busyNote, { n, of }); setStatus(tx(TEXT.status.busy, { sec: Math.round(pause / 1000), n, of })); },
         delaySec: Math.max(0, num(setting('autopilotDelay', 30))),
         rate: num(setting('rate', 1)) || 1,
         mods: Array.isArray(setting('mods', [])) ? setting('mods', []) : [],
         quick,
       };
-      statusEl.textContent = TEXT.status.simulating;
-      const result = await forecast(queue, ctx, (calls) => { if (token === scanToken) statusEl.textContent = `${TEXT.status.simulating} ${calls} sim call${calls === 1 ? '' : 's'}${Date.now() < busyUntil ? ` · ${busyNote}` : ''}`; }, token);
+      /** The scan's counts, updated as they go up: maps, plays done, answers reused, new simulator calls. */
+      const many = (n, one, more) => `${n} ${n === 1 ? one : more}`;
+      const countsLine = ({ plays, calls, fromCache }, estimated = 0) => [
+        many(queue.entries.length, 'map in queue', 'maps in queue'), `${plays} play${plays === 1 ? '' : 's'} done`,
+        many(fromCache, 'call reused', 'calls reused'), many(calls, 'new call', 'new calls'),
+        ...(estimated ? [`${estimated} estimated`] : []),
+      ].join(' · ');
+      const showCounts = (c) => { if (token === scanToken) setStatus(`${countsLine(c)}${Date.now() < busyUntil ? ` · ${busyNote}` : ''}`, TEXT.status.countsTip); };
+      setStatus(TEXT.status.simulating);
+      const result = await forecast(queue, ctx, showCounts, token);
       if (token !== scanToken) return;
       svPage = 0;
-      result.sv = await svCurves(queue, result, memPlaysOf(), token, () => {
-        if (token === scanToken) statusEl.textContent = `Checking Speed Jam / Memory maps… ${result.counts().calls} sim calls`;
-      });
+      result.sv = await svCurves(queue, result, memPlaysOf(), token, () => showCounts({ plays: result.plays.length, ...result.counts() }));
       result.setApprox(false);
       if (token !== scanToken) return;
       saveCache();
-      result.local = await localPlaysOf(row, queue, ctx.rate, localCount());
+      result.local = await localPlaysOf(row, queue, ctx.rate, localCount(), ctx.mods);
       if (token !== scanToken) return;
       result.scannedAt = Date.now();
       if (!quick) lastFullAt = result.scannedAt;
@@ -383,10 +391,7 @@ export const mount = (meta, host) => {
       root.classList.remove('qs-fresh');
       nowEl.classList.remove('qs-busy');
       if (firstResult) center(); else centerVertically();
-      const { calls: asked, fromCache: reused } = result.counts();
-      const estimated = result.plays.filter(p => p.approx).length;
-      if (quick && estimated) { statusEl.textContent = tx(TEXT.status.updated, { n: estimated, of: result.plays.length }); return; }
-      statusEl.textContent = `${queue.entries.length} map${queue.entries.length === 1 ? '' : 's'} in the queue${queue.label ? ` (${queue.label})` : ''}. ${asked} new sim call${asked === 1 ? '' : 's'}, ${reused} answer${reused === 1 ? '' : 's'} reused. Plays ${ctx.delaySec}s apart (your autopilot delay).`;
+      setStatus(countsLine({ plays: result.plays.length, ...result.counts() }, result.plays.filter(p => p.approx).length), TEXT.status.countsTip);
     } catch (e) {
       saveCache();
       if (e && e.message === 'stopped') return;
@@ -672,11 +677,12 @@ export const mount = (meta, host) => {
       // The local estimate is of the queue's maps alone, at the rate the queue plays each, from every play
       // its newest SETTINGS.localPlays within the last 24 hours.
       const rateOfEntry = (e) => e.lockedRate ?? ctx.rate;
+      const modsOfEntry = (e) => modsText(e.lockedRate === undefined ? ctx.mods : (e.lockedMods || []));
       const queueMaps = queue.entries.filter((e, i, all) => all.findIndex(x => x.beatmapId === e.beatmapId) === i);
       const realAvg = {};
       for (const d of r.local || (r.calib && r.calib.detail) || []) {
         const e = queueMaps.find(x => x.beatmapId === d.beatmapId);
-        if (!e || Math.abs(num(d.rate) - rateOfEntry(e)) > 0.001) continue;
+        if (!e || Math.abs(num(d.rate) - rateOfEntry(e)) > 0.001 || modsText(d.mods) !== modsOfEntry(e)) continue;
         const a = realAvg[d.beatmapId] || (realAvg[d.beatmapId] = { n: 0, xp: {}, day: d.day });
         a.n++;
         for (const sk of SKILLS) a.xp[sk] = (a.xp[sk] || 0) + num(d.real[sk]);
@@ -690,22 +696,23 @@ export const mount = (meta, host) => {
       const local = (p) => enough(queue.entries[p.entry].beatmapId);
       const simOf = (p, sk) => num(p.xp[sk]);
       // a real play already carries the fatigue, mindblock and bonuses it was played with
-      const realOf = (p, sk) => { const a = realAvg[queue.entries[p.entry].beatmapId]; return local(p) ? a.xp[sk] / a.n : 0; };
-      const sameOf = (p, sk) => (local(p) ? xpOf(p, sk) : 0);
-      // Speed Jam and Memory change with Tries, so an average of past plays is rough, when there is one
-      const ROUGH_REAL = ['speedjam', 'memory'].filter(sk => r.plays.some(p => realOf(p, sk) > 0));
+      // Speed Jam and Memory have no local estimate: their XP rises and falls with the map's Tries, so an average
+      // of past plays (at other Tries) says nothing about the next ones. The Speed Jam / Memory tab has them play by play.
+      const NO_LOCAL = new Set(['speedjam', 'memory']);
+      const realOf = (p, sk) => { if (NO_LOCAL.has(sk)) return 0; const a = realAvg[queue.entries[p.entry].beatmapId]; return local(p) ? a.xp[sk] / a.n : 0; };
+      const sameOf = (p, sk) => (local(p) && !NO_LOCAL.has(sk) ? xpOf(p, sk) : 0);
       const cmpRows = SKILLS.map(sk => ({ sk, sim: perHour(p => simOf(p, sk)), matched: perHour(p => xpOf(p, sk)), same: perHour(p => sameOf(p, sk)), real: perHour(p => realOf(p, sk)) }))
         .filter(x => x.sim > 0 || x.matched > 0 || x.real > 0);
       const sum = (k) => cmpRows.reduce((t, x) => t + x[k], 0);
       const apart = (a, b) => Math.max(a, b) > 0 && Math.abs(a - b) / Math.max(a, b) > 0.25;
       const realCell = (x, bold) => {
         if (!mapsEnough) return '<td class="n qs-dim">–</td>';
+        if (NO_LOCAL.has(x.sk)) return `<td class="n qs-dim" title="${esc(TEXT.xp.noLocal)}">–</td>`;
         // like against like: the same maps' plays with the bonuses
         const off = apart(x.same, x.real);
-        const rough = ROUGH_REAL.includes(x.sk);
-        const tip = `${rough ? 'Changes a lot with your Tries on the map, so an average of past plays is rough here. ' : ''}With your bonuses, the same ${allMaps ? 'plays' : `${mapsEnough} map${mapsEnough === 1 ? '' : 's'}`}: ${fmt(x.same)}/h${off ? ' (more than a quarter apart)' : ''}`;
+        const tip = `${x.sk === '' && cmpRows.some(y => NO_LOCAL.has(y.sk)) ? `${TEXT.xp.totalNoLocal} ` : ''}Simulator + Bonuses, the same ${allMaps ? 'plays' : `${mapsEnough} map${mapsEnough === 1 ? '' : 's'}`}: ${fmt(x.same)}/h${off ? ' (more than a quarter apart)' : ''}`;
         const v = bold ? `<b>${fmt(x.real)}</b>` : fmt(x.real);
-        return `<td class="n" title="${tip}"${off ? ' style="color:#fb923c; background:rgba(251,146,60,.10);"' : ''}>${v}${rough ? '<span class="qs-dim">*</span>' : ''}</td>`;
+        return `<td class="n" title="${tip}"${off ? ' style="color:#fb923c; background:rgba(251,146,60,.10);"' : ''}>${v}</td>`;
       };
       const total = { sk: '', sim: sum('sim'), matched: sum('matched'), same: sum('same'), real: sum('real') };
       r.localSummary = { maps: mapsEnough, of: queueMaps.length, plays: queueMaps.reduce((t, e) => t + playsOfMap(e.beatmapId), 0), real: total.real, same: total.same, perMap: Object.fromEntries(queueMaps.map(e => [e.beatmapId, playsOfMap(e.beatmapId)])) };
@@ -720,21 +727,20 @@ export const mount = (meta, host) => {
       const partial = mapsEnough > 0 && !allMaps;
       const liveNote = `<span style="color:#4ade80;" title="Read again after every new play.${r.localAt ? ` Last updated ${new Date(r.localAt).toLocaleTimeString()}.` : ''}">● Live</span>`;
       const mapList = `<details class="qs-local-list"${localOpen ? ' open' : ''} style="margin-top:4px;"><summary class="qs-dim" style="cursor:pointer;">Local plays per map</summary>
-          <table style="margin-top:4px;"><thead><tr><th>Map</th><th class="n">Rate</th><th class="n" title="Your plays of this map at the queue's rate in the last 24 hours.">Plays</th><th title="How many of your newest plays of this map at the queue's rate the estimate averages: the newest, up to ${localCount()} (the Local plays option).">Local estimate</th></tr></thead><tbody>
+          <table style="margin-top:4px;"><thead><tr><th>Map</th><th class="n">Rate</th><th class="n" title="Your plays of this map at the queue's rate and mods in the last 24 hours.">Plays</th><th title="How many of your newest plays of this map at the queue's rate the estimate averages: the newest, up to ${localCount()} (the Local plays option).">Local estimate</th></tr></thead><tbody>
           ${queueMaps.map(e => { const k = playsOfMap(e.beatmapId), day = realAvg[e.beatmapId] && realAvg[e.beatmapId].day; const dayCell = day ? day : day === 0 || !k ? '<span class="qs-dim">0</span>' : '<span class="qs-dim">–</span>';
             return `<tr><td class="qs-map" title="${esc(e.title)}">${esc(e.title)}</td><td class="n">${rateOfEntry(e)}×</td><td class="n">${dayCell}</td><td>${!k ? '<span style="color:#f87171">Not played yet</span>' : k >= localCount() ? `<span style="color:#4ade80">used ${k}</span>` : `<span style="color:#facc15" title="Fewer plays than the Local plays option (${localCount()}): the average is rougher">used ${k}</span>`}</td></tr>`; }).join('')}
           </tbody></table></details>`;
       const cmpTable = `
-        <div class="qs-tablewrap" style="margin-top:8px; max-width:${partial ? 640 : 520}px;"><table>
-          <thead><tr><th>Skill</th>
-            <th class="n" title="The simulator's own numbers, before your genetics, medals and other bonuses.">Simulator alone</th>
-            <th class="n" title="The simulator's XP with mindblock taken off, then your medals and genetics added, the way the server counts it. This is what the rest of the add-on uses.">With your bonuses</th>
-            ${partial ? `<th class="n" title="With your bonuses, for the ${mapsEnough} map${mapsEnough === 1 ? '' : 's'} that have a local estimate: what the last column is compared with.">Bonuses, ${mapsEnough} map${mapsEnough === 1 ? '' : 's'}</th>` : ''}
-            <th class="n" title="What each map actually gave you per play, on average over your newest ${localCount()} plays of it at the queue's rate in the last 24 hours (the Local plays option). A map you haven't played in that time is left out. Those plays had their own mindblock and strain, so expect some difference.">Local estimate${partial ? `, ${mapsEnough} map${mapsEnough === 1 ? '' : 's'}` : ''}</th></tr></thead>
-          <tbody>${cmpRows.map(x => `<tr><td>${SKILL_NAMES[x.sk]}</td><td class="n qs-dim">${fmt(x.sim)}</td><td class="n">${fmt(x.matched)}</td>${partial ? `<td class="n qs-dim">${fmt(x.same)}</td>` : ''}${realCell(x)}</tr>`).join('')}
-            <tr style="border-top:1px solid #2b2b3a;"><td><b>Total</b></td><td class="n qs-dim">${fmt(total.sim)}</td><td class="n"><b>${fmt(total.matched)}</b></td>${partial ? `<td class="n qs-dim">${fmt(total.same)}</td>` : ''}${realCell(total, true)}</tr></tbody>
+        <div class="qs-tablewrap" style="margin-top:8px; max-width:560px;"><table>
+          <thead><tr><th>Skill XP</th>
+            <th class="n" title="The simulator's own numbers, before your genetics, medals and other bonuses.">Simulator</th>
+            <th class="n" title="The simulator's XP with mindblock taken off, then your medals and genetics added, the way the server counts it. This is what the rest of the add-on uses.">Simulator + Bonuses</th>
+            <th class="n" title="What each map actually gave you per play, on average over your newest ${localCount()} plays of it at the queue's rate and mods in the last 24 hours (the Local plays option). A map you haven't played in that time is left out. Those plays had their own mindblock and strain, so expect some difference.${partial ? ` Covers the ${mapsEnough} played map${mapsEnough === 1 ? '' : 's'} only: hover a number to compare it with the same maps' Simulator + Bonuses.` : ''}">Local Estimation</th></tr></thead>
+          <tbody>${cmpRows.map(x => `<tr><td>${SKILL_NAMES[x.sk]}</td><td class="n qs-dim">${fmt(x.sim)}</td><td class="n">${fmt(x.matched)}</td>${realCell(x)}</tr>`).join('')}
+            <tr style="border-top:1px solid #2b2b3a;"><td><b>Total</b></td><td class="n qs-dim">${fmt(total.sim)}</td><td class="n"><b>${fmt(total.matched)}</b></td>${realCell(total, true)}</tr></tbody>
         </table></div>
-        <div class="qs-dim" style="margin-top:4px; max-width:640px;">${liveNote} · ${localLine}${mapsEnough && cmpRows.some(x => ROUGH_REAL.includes(x.sk)) ? ' *Rough: depends on Tries.' : ''}</div>
+        <div class="qs-dim" style="margin-top:4px; max-width:640px;">${liveNote} · ${localLine}</div>
         ${mapList}`;
       // what the genetics add to each skill, and the XP that comes from it
       const geneRows = SKILLS.filter(sk => genetics[sk]).map(sk => {

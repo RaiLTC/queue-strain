@@ -250,9 +250,12 @@ export async function calibrate(row, queue, { startMinutes, rate, triesOffset = 
   return out;
 }
 
-/** The local estimate's plays: each queue map's newest real plays at the rate the queue plays it (SETTINGS.localPlays),
- *  as { beatmapId, rate, playedAt, real }. Read from the game's database alone: no simulator call. */
-export async function localPlaysOf(row, queue, rate, count = SETTINGS.localPlays) {
+/** A set of mods as one text, in any order: "HR,SD". */
+export const modsText = (mods) => (Array.isArray(mods) ? mods : String(mods || '').split(',')).map(v => String(v).trim()).filter(Boolean).sort().join(',');
+/** The local estimate's plays: each queue map's newest real plays at the rate and mods the queue plays it
+ *  (SETTINGS.localPlays), as { beatmapId, rate, mods, playedAt, real }. Read from the game's database alone: no
+ *  simulator call. `rate` and `mods`: the player's, for the entries that don't lock their own. */
+export async function localPlaysOf(row, queue, rate, count = SETTINGS.localPlays, mods = []) {
   const since = Date.now() - DAY_MS; // the last 24 hours only
   const out = [];
   for (const entry of queue.entries.filter((e, i, all) => all.findIndex(x => x.beatmapId === e.beatmapId) === i)) {
@@ -261,11 +264,12 @@ export async function localPlaysOf(row, queue, rate, count = SETTINGS.localPlays
       rows = await gameRows('SELECT x.playedAt AS playedAt, x.gains AS gains, s.rate AS rate, s.mods AS mods FROM score_xp x LEFT JOIN score s ON s.id = x.scoreId WHERE x.characterId = ? AND x.beatmapId = ? AND x.playedAt >= ? ORDER BY x.playedAt DESC LIMIT ?', [row.id, entry.beatmapId, since, 5000]);
     } catch (_) { rows = null; }
     const queueRate = entry.lockedRate ?? rate;
-    const atRate = (rows || []).filter(v => num(v.playedAt) >= since && Math.abs((num(v.rate) || 1) - queueRate) < 0.001);
+    const queueMods = modsText(entry.lockedRate === undefined ? mods : (entry.lockedMods || []));
+    const atRate = (rows || []).filter(v => num(v.playedAt) >= since && Math.abs((num(v.rate) || 1) - queueRate) < 0.001 && modsText(v.mods) === queueMods);
     // the map's plays at this rate in the last 24 hours, shown next to how many the estimate uses
     const day = atRate.length;
     for (const x of atRate.slice(0, count)) {
-      out.push({ beatmapId: entry.beatmapId, rate: num(x.rate) || 1, playedAt: num(x.playedAt), real: parseGains(x.gains), day });
+      out.push({ beatmapId: entry.beatmapId, rate: num(x.rate) || 1, mods: queueMods, playedAt: num(x.playedAt), real: parseGains(x.gains), day });
     }
   }
   return out;
@@ -307,6 +311,8 @@ export async function forecast(queue, ctx, onProgress, token) {
   let runToken = token;
   const asks = new Map();
   let calls = 0, nextCall = 0, fromCache = 0;
+  /** How far the scan is: plays forecast so far, new simulator calls, stored answers reused. */
+  const progress = () => ({ plays: plays.length, calls, fromCache });
   // a quick update (after a queue change): a play the cache has no answer for borrows the nearest stored one,
   // and only a map with none at all asks the simulator. The scan turns it off after the Speed Jam / Memory curves.
   let approxOn = !!ctx.quick, approxIndex = null;
@@ -372,7 +378,8 @@ export async function forecast(queue, ctx, onProgress, token) {
             while (Date.now() < until) { if (runToken !== scanToken) throw new Error('stopped'); await sleep(250); }
           }
         }
-        onProgress(++calls);
+        calls++;
+        onProgress(progress());
         remember(asOwner, key, answer);
         return answer;
       })());
@@ -481,6 +488,7 @@ export async function forecast(queue, ctx, onProgress, token) {
     if (recent.length > RECENT_LIMIT * 2) recent.splice(0, recent.length - RECENT_LIMIT);
     plays.push({ entry: at, start, end: t, before, tries, fresh, approx: !!approx, ups, recentPlays, block, simStrain: bucket, simTries: playsKey, failAt: passed ? undefined : num(answer.fail_progress), xp: answer.xp || {}, strained, lengthMin: fullSec / 60, minutes: fatigue.minutes, bar, trend: warmupTrend(fullSec / 60, strained), passed });
     samples.push({ t, minutes: fatigue.minutes, bar });
+    onProgress(progress());
     t += delaySec;
     if (!loopFrom && plays.length === first.length) {
       loopFrom = { plays: plays.length, t, minutes: restedFatigue(fatigue, t * 1000, genes, gear) };
