@@ -11,8 +11,8 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.3.53';
-export const VERSION_ID = '2026-11-12 05H49M';
+export const VERSION = '1.3.58';
+export const VERSION_ID = '2026-11-12 06H15M';
 
 // none / info / urgent
 export const NOTICE = {
@@ -25,16 +25,14 @@ export const NOTICE = {
 export const CHANGELOG = {
   id: VERSION_ID,
   text: `v${VERSION} · 12 Nov 2026
-• Fixed window fading when opened under the mouse
-• Opening the Window options no longer moves the window
-• Window turns see-through when clicking through to the mods menu
-
-v1.3.5
 • Strain bar shows where you're headed, with a time slider
 • XP loss shown past the XP cut
 • Overall level on top, rebirth time in words
 • Clearer times and colours
 • Smarter window behaviour, with new Window options
+• Clicks pass through to the mods menu, options and Add-ons
+• Chat shows through the window when you point at it
+• Esc closes an open menu or the chat first
 • Bunch of fixes`,
 };
 
@@ -58,6 +56,13 @@ export const SETTINGS = {
   escEditing: 'addon',
   // while editing the queue with its mods menu up, clicks go through this window to the menu under it
   modsPassThrough: true,
+  // while the game's options menu is open, clicks go through this window too, and it turns this see-through (%)
+  optionsPassThrough: true,
+  optionsSeeThrough: 90,
+  // and on the game's Add-ons page, hidden completely
+  addonsSeeThrough: 100,
+  // while the chat is open, the part of this window over it is cleared, so the chat shows and takes clicks there
+  chatHole: true,
   // the local estimate: each map's newest this many real plays at the queue's rate (closest to your current level)
   localPlays: 5,
   // calibration simulates each real play again: the newest this many per map
@@ -127,6 +132,10 @@ export const TEXT = {
     outsideClose: 'Closes it (the game ignores the click)',
     outsideThrough: 'Closes it (the game gets the click too)',
     outsideStay: 'Nothing',
+    optionsPass: 'Click through when options or Add-ons is open',
+    optionsPassTip: 'While the game\'s options menu or Add-ons page is open, this window turns see-through (hidden on Add-ons) and clicks go through it to the game.',
+    chatHole: 'Show the chat through the window',
+    chatHoleTip: 'While the chat is open, the part of this window over it is cleared, so the chat can be read and clicked there.',
     modsPass: 'Click through when mods menu is open',
     modsPassTip: 'While editing the queue with the mods menu open, this window turns see-through (as much as the fade slider says) and clicks go through it to the game, so the menu can be used even under it.',
   },
