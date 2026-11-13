@@ -61,7 +61,7 @@ export async function mapNames() {
       const walk = (v) => {
         if (!v || typeof v !== 'object') return;
         if (Array.isArray(v)) { v.forEach(walk); return; }
-        if (Array.isArray(v.versions) && v.title) for (const d of v.versions) if (d && d.id) out[d.id] = `${v.artist ? `${v.artist} - ` : ''}${v.title}${d.version ? ` [${d.version}]` : ''}`;
+        if (Array.isArray(v.versions) && v.title) for (const d of v.versions) if (d && d.id) { out[d.id] = `${v.artist ? `${v.artist} - ` : ''}${v.title}${d.version ? ` [${d.version}]` : ''}`; catalogLen[d.id] = num(d.total_length) / 1000; catalogStars[d.id] = num(d.difficulty); catalogInfo[d.id] = { keys: num(d.keys), mode: num(d.mode), objects: num(d.objects), ln: num(d.ln), bpm: num(d.bpm) }; }
         for (const k in v) if (k !== 'versions') walk(v[k]);
       };
       walk(await res.json());
@@ -69,6 +69,182 @@ export async function mapNames() {
     } else logProblem('catalog', `server answered ${res.status}`);
   } catch (e) { logProblem('catalog', e); }
   return out;
+}
+/** Each map's length in seconds at 1×, from the same catalog. */
+const catalogLen = {};
+/** And its star rating. */
+const catalogStars = {};
+/** And its keys, mode, note and long-note counts and BPM. */
+const catalogInfo = {};
+// ---------------------------------------------------------------------
+// A proven ceiling on a map's XP, without simulating it: the game's own XP formula (shared
+// rulesets/mania/4k/bots/character.ts factorXP, oss-idle v1.4.3.0) with every factor at its largest.
+// raw = mapXP(share x levelF x scoreF x notesF x lengthF x 1000), then x the skill's multiplier, + the first
+// clear bonus (accuracy), x HR's 1.1 (accuracy). scoreF <= 1.5; mapXP(v) <= 2.001 v (its curve overshoots 1 by
+// about 0.0002); notesF rises with the note count, so the chart's full count bounds it; release can't win a
+// slot without long notes; consistency is capped at 0.33 of the pressure. Memory has no useful bound.
+// ---------------------------------------------------------------------
+const CB_LEVEL = cubicBezier(0, 0.8, 0.4, 1), CB_NOTES = cubicBezier(0.62, 0.16, 0.5, 0.83), CB_LENGTH = cubicBezier(0.2, 0, 0.75, 0);
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const norm = (n, a, b) => (b > a ? clamp01((Math.max(a, Math.min(b, n)) - a) / (b - a)) : (n >= b ? 1 : 0));
+const tr = (n, a, b, c, d) => c + norm(n, a, b) * (d - c);
+const NOTES_KIND = { accuracy: 'high', concentration: 'high', release: 'high', stamina: 'high', coordination: 'high', speed: 'medium', speedjam: 'medium', consistency: 'medium' };
+const notesFactor = (skill, L, notes) => {
+  const kind = NOTES_KIND[skill] || 'low';
+  const [a, b] = kind === 'high' ? [tr(L, 0, 70, 0, 400), tr(L, 20, 100, 800, 1800)] : kind === 'medium' ? [tr(L, 0, 70, 0, 200), tr(L, 0, 100, 300, 1200)] : [tr(L, 0, 70, 0, 20), tr(L, 0, 100, 50, 700)];
+  return CB_NOTES(norm(notes, a, b));
+};
+const levelFactor = (L) => 1 + (1 - CB_LEVEL(clamp01(L / 40))) * 2;
+const lengthFactor = (ms) => 1 + CB_LENGTH(clamp01((ms - 120000) / 180000)) * 2;
+const skillMultiplier = (row, sk) => { const od = num(row[`${sk}Overdrive`]), odM = od <= 0 ? 1 : Math.max(1, Math.min(od, 2.5 * Math.pow(od, Math.log10(2)))); return (1 + 0.1 * num(row[`${sk}Upgrades`]) * odM) * Math.pow(1.1, num(row[`${sk}Prestige`])); };
+/** The most XP a play of map `id` at `rate` can give `skill` (simulator units), or Infinity when it can't be bounded. */
+export const xpCeiling = (row, id, rate, skill, mods = [], everPlayed = true) => {
+  // memory only pays on a map you've played (its progress is 0 at 0 plays); past that it can't be bounded
+  if (skill === 'memory') return everPlayed ? Infinity : 0;
+  const info = catalogInfo[id], len = catalogLen[id];
+  if (!info || !len || !info.objects) return Infinity;
+  const notes = info.objects + num(info.ln), L = num(row[skill]);
+  const share = skill === 'release' ? (num(info.ln) > 0 ? 1 : 0) : skill === 'consistency' ? 0.33 : 1;
+  if (!share) return 0;
+  const v = share * levelFactor(L) * 1.5 * notesFactor(skill, L, notes) * lengthFactor(len * 1000 / rate) * 1000;
+  let xp = 2.001 * v * skillMultiplier(row, skill);
+  if (skill === 'accuracy') { xp += Math.floor(1000 * num(catalogStars[id]) * rate * 1.5); if ((mods || []).includes('HR')) xp *= 1.1; }
+  return xp;
+};
+const PHYSICAL_GOALS = new Set(['speed', 'stamina', 'jackspeed', 'coordination', 'all']);
+/** Maps from the whole library worth simulating for `goal`: every 4K map in the game's catalog (the server's, so
+ *  current), without the ones in the queue, the ones harder than you've passed
+ *  lately, and the ones that can't give the goal skill anything at all; ranked for the goal, the best `limit`. */
+/** Every 4K map in the catalog: id, name, stars and length (seconds at 1x). */
+export const catalogEntries = async () => {
+  const names = await mapNames();
+  return Object.keys(catalogInfo).map(Number).filter(id => catalogInfo[id].mode === 3 && catalogInfo[id].keys === 4 && catalogLen[id] > 0)
+    .map(id => ({ id, title: names[id] || `Map ${id}`, stars: num(catalogStars[id]), lengthSec: catalogLen[id] }));
+};
+/** The last library pick: maps considered, and how many were ruled out by their proven ceiling. */
+export const libraryStats = { considered: 0, provenOut: 0, bar: 0, broken: 0 };
+export async function libraryMaps(row, skipIds, { goal = 'all', rate = 1, mods = [], limit = 12, known = new Map() } = {}) {
+  const names = await mapNames();
+  const skip = new Set(skipIds.map(Number));
+  // the hardest map you've passed in the last 30 days, at about the rate you'd play these
+  let hardest = 0;
+  try {
+    const rows = (await gameRows('SELECT beatmapId, rate FROM score WHERE characterId = ? AND playedAt >= ?', [row.id, Date.now() - 30 * DAY_MS])) || [];
+    for (const x of rows) hardest = Math.max(hardest, num(catalogStars[num(x.beatmapId)]) * (num(x.rate) || 1));
+  } catch (_) {}
+  const cap = hardest > 0 ? hardest * 1.05 : Infinity;
+  // your real fails lately, per map: a map you often fail is worth less than its XP says
+  const failsOf = new Map(), playsOf = new Map();
+  try {
+    for (const x of (await gameRows('SELECT beatmapId, share FROM memory_fail WHERE characterId = ? AND playedAt >= ?', [row.id, Date.now() - 30 * DAY_MS])) || []) failsOf.set(num(x.beatmapId), (failsOf.get(num(x.beatmapId)) || 0) + 1);
+    for (const x of (await gameRows('SELECT beatmapId FROM score WHERE characterId = ? AND playedAt >= ?', [row.id, Date.now() - 30 * DAY_MS])) || []) playsOf.set(num(x.beatmapId), (playsOf.get(num(x.beatmapId)) || 0) + 1);
+  } catch (_) {}
+  const goalXp = (xp) => (goal === 'all' ? Object.values(xp).reduce((t, v) => t + num(v), 0) : num(xp[goal]));
+  const ids = Object.keys(catalogInfo).map(Number).filter(id => catalogInfo[id].mode === 3 && catalogInfo[id].keys === 4);
+  const scored = [];
+  for (const id of ids) {
+    if (skip.has(id) || !catalogLen[id] || !names[id]) continue;
+    const info = catalogInfo[id] || {};
+    const stars = num(catalogStars[id]) * rate;
+    if (!(stars > 0) || stars > cap) continue;
+    const lnShare = info.objects ? num(info.ln) / info.objects : 0;
+    // a skill that can't win a single note on this chart: release needs long notes
+    if (goal === 'release' && !(lnShare > 0)) continue;
+    const minutes = catalogLen[id] / rate / 60;
+    // notes a second at this rate: the main pressure on speed and stamina
+    const nps = info.objects ? info.objects / Math.max(1, catalogLen[id] / rate) : 0;
+    // how promising, for the goal: physical skills want hard charts, accuracy long ones, release LN-heavy ones
+    const nearTop = cap < Infinity ? stars / cap : stars / 10;
+    const guess = goal === 'accuracy' ? minutes * (0.5 + nearTop) / Math.sqrt(1 + nps / 10)
+      : goal === 'release' ? lnShare * nearTop * Math.sqrt(minutes)
+      : PHYSICAL_GOALS.has(goal) ? nearTop * nearTop * Math.sqrt(minutes) * (1 + nps / 20)
+      : nearTop * Math.sqrt(minutes);
+    // what the simulator already said about it at your levels, when it has: real XP a minute and fails
+    const k = known.get(`${id}@${rate}`);
+    const real = k && k.n ? goalXp(k.xp) / k.n / Math.max(0.1, minutes) : undefined;
+    const realFails = (failsOf.get(id) || 0) / Math.max(1, (failsOf.get(id) || 0) + (playsOf.get(id) || 0));
+    const failShare = Math.max(k && k.n ? k.fails / k.n : 0, realFails);
+    scored.push({ id, guess, real, failShare, stars });
+  }
+  // the guesses put on the real answers' scale: the typical real XP a minute per unit of guess, from the maps that have both
+  const ratios = scored.filter(m => m.real > 0 && m.guess > 0).map(m => m.real / m.guess).sort((a, b) => a - b);
+  const toReal = ratios.length ? ratios[Math.floor(ratios.length / 2)] : 1;
+  for (const m of scored) m.score = (m.real ?? m.guess * toReal) * (1 - m.failShare);
+  // proven pruning: a map whose ceiling (most XP a minute it could ever give the goal) is under the best XP a minute
+  // a map has really given (simulated at your levels) can't win, so it isn't simulated at all
+  const ceilOf = (m) => { const minutes = Math.max(0.1, catalogLen[m.id] / rate / 60); const sk = goal === 'all' ? SKILLS : [goal]; return sk.reduce((t, s) => t + xpCeiling(row, m.id, rate, s, mods, everPlayed.has(m.id)), 0) / minutes; };
+  const bar = Math.max(0, ...scored.filter(m => m.real > 0).map(m => m.real));
+  const everPlayed = new Set();
+  try { for (const x of (await gameRows('SELECT DISTINCT beatmapId FROM score WHERE characterId = ?', [row.id])) || []) everPlayed.add(num(x.beatmapId)); } catch (_) { for (const m of scored) everPlayed.add(m.id); }
+  let provenOut = 0;
+  const survivors = scored.filter(m => { if (m.real !== undefined) return true; const c = ceilOf(m); if (c <= bar) { provenOut++; return false; } return true; });
+  // the check that the ceilings hold: no map simulated at your levels may have beaten its own ceiling
+  libraryStats.broken = scored.filter(m => m.real > 0 && m.real > ceilOf(m) * 1.0001).length;
+  libraryStats.provenOut = provenOut; libraryStats.considered = scored.length; libraryStats.bar = bar;
+  scored.length = 0; scored.push(...survivors);
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit).map(m => ({
+    beatmapId: m.id, title: names[m.id], lockedRate: rate, lockedMods: mods, repeat: 1, played: 0, lengthSec: catalogLen[m.id],
+    history: { perMin: m.real || 0, plays: 0, stars: m.stars / rate, library: true, fails: m.failShare, known: m.real !== undefined },
+  }));
+}
+/** Maps from the player's own recent history (the last `days`) that aren't in the queue, as queue entries ready
+ *  to forecast: played at the rate and mods last used on them, ranked by the real XP a minute they earned then
+ *  (from the game's XP log, no simulator call). The best `top` of them. */
+export async function historyMaps(row, skipIds, { days = 7, top = 5, easy = 0 } = {}) {
+  const names = await mapNames();
+  const skip = new Set(skipIds.map(Number));
+  let rows = [];
+  try {
+    rows = (await gameRows('SELECT x.beatmapId AS id, x.gains AS gains, s.rate AS rate, s.mods AS mods FROM score_xp x LEFT JOIN score s ON s.id = x.scoreId WHERE x.characterId = ? AND x.playedAt >= ? ORDER BY x.playedAt DESC', [row.id, Date.now() - days * DAY_MS])) || [];
+  } catch (e) { logProblem('history', e); }
+  const byMap = new Map();
+  for (const x of rows) {
+    const id = num(x.id);
+    if (!id || skip.has(id) || !catalogLen[id]) continue;
+    let xp = 0;
+    try { const g = JSON.parse(x.gains || '{}'); for (const v of Object.values(g || {})) xp += num(v); } catch (_) {}
+    const m = byMap.get(id) || { id, rate: num(x.rate) || 1, mods: x.mods, xp: 0, n: 0 };
+    // the newest play sets the rate and mods; the plays at that rate and mods make the average
+    if ((num(x.rate) || 1) === m.rate && String(x.mods || '') === String(m.mods || '')) { m.xp += xp; m.n++; }
+    byMap.set(id, m);
+  }
+  const all = [...byMap.values()].filter(m => m.n > 0 && m.xp > 0).map(m => {
+    const lengthSec = catalogLen[m.id];
+    const perMin = (m.xp / m.n) / Math.max(0.1, lengthSec / m.rate / 60);
+    const mods = (Array.isArray(m.mods) ? m.mods : String(m.mods || '').split(',')).map(v => String(v).trim()).filter(Boolean);
+    return { beatmapId: m.id, title: names[m.id] || `Map ${m.id}`, lockedRate: m.rate, lockedMods: mods, repeat: 1, played: 0, lengthSec, history: { perMin, plays: m.n, stars: catalogStars[m.id] || 0 } };
+  });
+  // the best by XP a minute, and (to cool down after a push) the easiest by star rating
+  const best = [...all].sort((a, b) => b.history.perMin - a.history.perMin).slice(0, top);
+  const cool = all.filter(e => !best.includes(e) && e.history.stars > 0).sort((a, b) => a.history.stars - b.history.stars).slice(0, easy).map(e => ({ ...e, history: { ...e.history, easy: true } }));
+  return [...best, ...cool];
+}
+
+/** Writes `entries` (queue entries: beatmapId, lockedRate, lockedMods, repeat) into the character's playlist `name`,
+ *  replacing what it held; created when missing, unless `mustExist` (overriding the current playlist). The way the
+ *  official sim writes its playlists: one database write for the lot. Returns whether it was created. */
+export async function writePlaylist(row, name, entries, { mustExist = false } = {}) {
+  const SUGGESTED_PLAYLIST = String(name || '').trim();
+  if (!SUGGESTED_PLAYLIST) throw new Error('Give the playlist a name.');
+  const db = window.db;
+  if (!db || !db.write) throw new Error('The game has not opened its database yet.');
+  const hasChar = num((await gameRows("SELECT COUNT(*) AS n FROM pragma_table_info('playlist') WHERE name = 'characterId'"))?.[0]?.n) > 0;
+  const findId = async () => { const r = await gameRows(hasChar ? 'SELECT id FROM playlist WHERE name = ? AND characterId = ? ORDER BY id LIMIT 1' : 'SELECT id FROM playlist WHERE name = ? ORDER BY id LIMIT 1', hasChar ? [SUGGESTED_PLAYLIST, row.id] : [SUGGESTED_PLAYLIST]); return r && r[0] ? num(r[0].id) : undefined; };
+  let id = await findId();
+  const created = id === undefined;
+  if (created && mustExist) throw new Error(`No saved playlist named "${SUGGESTED_PLAYLIST}" to override.`);
+  if (created) {
+    await db.write(d => { d.exec(hasChar ? 'INSERT INTO playlist (name, createdAt, characterId) VALUES (?, ?, ?)' : 'INSERT INTO playlist (name, createdAt) VALUES (?, ?)', hasChar ? [SUGGESTED_PLAYLIST, Date.now(), row.id] : [SUGGESTED_PLAYLIST, Date.now()]); });
+    id = await findId();
+    if (id === undefined) throw new Error('Could not create the playlist.');
+  }
+  const order = ['EZ', 'NF', 'HR', 'SD', 'PF'];
+  await db.write(d => {
+    d.exec('DELETE FROM playlist_entry WHERE playlistId = ?', [id]);
+    entries.forEach((e, i) => d.exec('INSERT INTO playlist_entry (playlistId, beatmapId, rate, mods, position, repeat) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, e.beatmapId, e.lockedRate ?? 0, order.filter(m => (e.lockedMods || []).includes(m)).join(','), i + 1, Math.max(1, num(e.repeat) || 1)]));
+  });
+  return created;
 }
 export let medalsKept = null;
 /** Diagnostics: the add-on's last 20 problems this session (failed calls, retries, servers that didn't answer). */

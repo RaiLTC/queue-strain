@@ -2,7 +2,7 @@
 
 import { SETTINGS } from './config.js';
 import { MINDBLOCK, RECENT_LIMIT, SKILLS, gameRows, logProblem, medalsOf, memoryPlays, mindblockFactor, num, playsSince, recentPlaysOf, serverTries } from './game.js';
-import { LEAD_IN_MS, STRAIN_CAP, afterPlay, barKnots, barOf, gainLevels, restedFatigue, warmupTrend, xpForLevel } from './rules/fatigue.js';
+import { LEAD_IN_MS, PHYSICAL, STRAIN_CAP, afterPlay, barKnots, barOf, fatigueLevel, fatigueXp, gainLevels, lerp, restedFatigue, warmup, warmupTrend, xpForLevel } from './rules/fatigue.js';
 import { DAY_MS, geneticsXpOf, recall } from './rules/genes.js';
 import { scanToken } from './ui/window.js';
 
@@ -24,13 +24,39 @@ export const CALL_SPACING_MS = SETTINGS.callSpacingMs;
 export const MAX_PLAYS = 3000;
 
 export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Long runs of answers already known come back without ever letting the game draw a frame: every ~10ms, step aside
+// for a moment so the game stays smooth.
+let lastYield = 0;
+export const breathe = async () => { const now = performance.now(); if (now - lastYield > 10) { await new Promise(r => setTimeout(r, 0)); lastYield = performance.now(); } };
+// One limit for every simulator call the add-on makes, from anywhere (scans, Suggestions, the library, all at once):
+// at most one every CALL_SPACING_MS and 1,100 a minute, under the server's 1,200 a minute a player. A busy answer
+// (429) pauses them all for as long as the server asks.
+const callTimes = [];
+let lastCall = 0, pausedUntil = 0;
+export const pauseCalls = (ms) => { pausedUntil = Math.max(pausedUntil, Date.now() + ms); };
+export const callSlot = async () => {
+  for (;;) {
+    const now = Date.now();
+    while (callTimes.length && now - callTimes[0] > 60000) callTimes.shift();
+    const wait = Math.max(pausedUntil - now, lastCall + CALL_SPACING_MS - now, callTimes.length >= 1100 ? 60000 - (now - callTimes[0]) + 20 : 0);
+    if (wait <= 0) { callTimes.push(now); lastCall = now; return; }
+    await sleep(Math.max(5, wait));
+  }
+};
+/** Runs `tasks` (functions returning promises) at most `limit` at once; their results in order. */
+export const pool = async (tasks, limit) => {
+  const out = new Array(tasks.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, async () => { while (next < tasks.length) { const i = next++; out[i] = await tasks[i](); } }));
+  return out;
+};
 
 // The simulator's answers, kept across scans and restarts. An answer belongs to the character as it
 // was: its generation and every skill's whole level, prestige and upgrades. When any of those change
 // the answers stop counting, and none counts past a day.
 export const CACHE_KEY = 'queue-strain:sim';
 export const CACHE_TTL_MS = 24 * 3600 * 1000;
-export const CACHE_MAX = 4000;
+export const CACHE_MAX = 30000;
 export let simCache = null;
 export let cacheDirty = false;
 
@@ -44,13 +70,50 @@ export const loadCache = () => {
   } catch (_) { /* a broken cache is an empty one */ }
   return simCache;
 };
+// kept in IndexedDB (a database the game keeps on this computer, sized in gigabytes, not localStorage's 5MB)
+const CACHE_DB = 'queue-strain-cache';
+const cacheDb = () => new Promise((ok, no) => { const q = indexedDB.open(CACHE_DB, 1); q.onupgradeneeded = () => { if (!q.result.objectStoreNames.contains('kv')) q.result.createObjectStore('kv'); }; q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error); });
+let cacheLoaded = null;
+/** Loads the stored answers from IndexedDB (once), moving any left in localStorage over and removing them there. */
+export const initCache = () => {
+  if (cacheLoaded) return cacheLoaded;
+  cacheLoaded = (async () => {
+    const map = loadCache(), now = Date.now();
+    try {
+      const db = await cacheDb();
+      const saved = await new Promise((ok) => { const q = db.transaction('kv', 'readonly').objectStore('kv').get('sim'); q.onsuccess = () => ok(q.result || {}); q.onerror = () => ok({}); });
+      db.close();
+      for (const [k, v] of Object.entries(saved.entries || {})) if (v && now - v.at < CACHE_TTL_MS && !map.has(k)) map.set(k, v);
+    } catch (_) {}
+    try { if (localStorage.getItem(CACHE_KEY)) { cacheDirty = true; localStorage.removeItem(CACHE_KEY); } } catch (_) {}
+  })();
+  return cacheLoaded;
+};
 export const saveCache = () => {
   if (!simCache || !cacheDirty) return;
-  // the newest first, up to the cap
-  const entries = [...simCache.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, CACHE_MAX);
+  // the newest first, up to the cap; old ones (past a day) go
+  const now = Date.now();
+  const entries = [...simCache.entries()].filter(([, v]) => now - v.at < CACHE_TTL_MS).sort((a, b) => b[1].at - a[1].at).slice(0, CACHE_MAX);
   simCache = new Map(entries);
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ entries: Object.fromEntries(entries) })); } catch (_) {}
   cacheDirty = false;
+  void cacheDb().then(db => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put({ entries: Object.fromEntries(entries) }, 'sim'); tx.oncomplete = () => db.close(); tx.onerror = () => db.close(); }).catch(() => {});
+};
+/** What the simulator has already answered about each map at `owner`'s levels (our stored answers): plays, fails
+ *  and XP per skill, by map@rate. Free real data for ranking maps without new calls. */
+export const knownMaps = (owner) => {
+  const out = new Map();
+  for (const [k, v] of loadCache()) {
+    if (!v || !v.answer || Date.now() - v.at >= CACHE_TTL_MS) continue;
+    const parts = k.split('|');
+    if (parts[0] !== owner) continue;
+    const id = num(parts[1]), rate = num(parts[2]);
+    const key = `${id}@${rate}`, m = out.get(key) || { id, rate, n: 0, fails: 0, xp: {} };
+    m.n++;
+    if (v.answer.passed === false) m.fails++;
+    for (const [sk, x] of Object.entries(v.answer.xp || {})) m.xp[sk] = (m.xp[sk] || 0) + num(x);
+    out.set(key, m);
+  }
+  return out;
 };
 /** What the answers depend on in the character: the cache key's first part. */
 export const ownerOf = (row) => [num(row.id), num(row.generation) || 1,
@@ -125,6 +188,232 @@ export const answerIndex = (charId) => {
     index.get(group).push({ own: parts[0], bucket: num(parts[4]), plays: num(parts[5]), run: parts[6] ? num(parts[6].slice(1)) : 0, answer: v.answer });
   }
   return index;
+};
+
+
+// ---------------------------------------------------------------------
+// The official sim add-on's stored plays (IndexedDB 'oss-idle-sim', store 'plays'): players run it a lot, so it
+// often has already simulated the very play a forecast needs. Its key (github.com/oss-idle/addon-sim, samples.ts
+// and sweep.ts): sim version | the 11 skills' play levels, rounded | DIVINE 0/1 | map@rate@mods | map plays.
+// Its XP is the simulator's with the mods and (physical skills) fatigue divided out, so both go back in here.
+// ---------------------------------------------------------------------
+const GAME_SKILLS = ['accuracy', 'speed', 'stamina', 'jackspeed', 'coordination', 'release', 'reading', 'consistency', 'concentration', 'speedjam', 'memory'];
+const MOD_ORDER = ['EZ', 'NF', 'HR', 'SD', 'PF'];
+const OFFICIAL_KEEP_MS = 7 * 24 * 3600 * 1000;
+const xpGivesLevel = (xp) => { let level = 0; while (level < 400 && xp >= xpForLevel(level)) { xp -= xpForLevel(level); level++; } return { level, xp }; };
+const levelProgress = (level, xp) => { const n = xpForLevel(level); return n > 0 ? Math.min(1, Math.max(0, xp / n)) : 0; };
+/** A skill's play level, as the game reckons it (shared xp.ts): the better of its level and the level its lifetime XP buys, plus prestige. */
+const playLevelOf = (level, xp, lifetimeXp, prestige = 0) => { const lt = xpGivesLevel(lifetimeXp); return Math.max(level + levelProgress(level, xp), lt.level + levelProgress(lt.level, lt.xp)) + prestige; };
+/** How much of a physical skill's level is there to play with, tired and warmed up as it is (shared fatigue.ts). */
+const keptShare = (level, fatigue, warm = 1) => lerp(1, 0.25, fatigue) * lerp(lerp(1, 0.5, Math.min(1, level / 100)), 1, warm);
+const xpToLevel = (level) => { let t = 0; for (let i = 0; i < level; i++) t += xpForLevel(i); return t; };
+const levelsMemo = new Map();
+const officialLevels = (skills, minutes, rested = false) => {
+  const mk = `${rested ? 1 : 0}|${Math.round(minutes * 10)}|${GAME_SKILLS.map(n => { const s = skills[n] || {}; return `${s.level}:${s.xp}:${s.lifetime_xp}:${s.prestige}`; }).join(',')}|${num(skills.stamina && skills.stamina.upgrades)}`;
+  if (levelsMemo.has(mk)) return levelsMemo.get(mk);
+  if (levelsMemo.size > 5000) levelsMemo.clear();
+  const v = officialLevelsNow(skills, minutes, rested);
+  levelsMemo.set(mk, v);
+  return v;
+};
+const officialLevelsNow = (skills, minutes, rested = false) => {
+  const restedOnly = rested;
+  const fatigue = fatigueLevel(minutes), warm = warmup(minutes, num(skills.stamina && skills.stamina.upgrades));
+  return GAME_SKILLS.map((name) => {
+    const s = skills[name] || {};
+    const rested = playLevelOf(num(s.level), num(s.xp), num(s.lifetime_xp), num(s.prestige));
+    const kept = PHYSICAL.includes(name) && !restedOnly ? keptShare(rested, fatigue, warm) : 1;
+    let lv = rested;
+    if (kept < 1) { const tired = xpGivesLevel((xpToLevel(num(s.level)) + num(s.xp)) * kept); lv = playLevelOf(tired.level, tired.xp, num(s.lifetime_xp) * kept, num(s.prestige)); }
+    return lv < 100 ? Math.round(lv) : Math.round(lv * 2) / 2;
+  }).join(',');
+};
+/**
+ * Every play the official sim stored that fits the character now, for the library scan: by map@rate, its XP per
+ * skill (in the simulator's terms) and strain. For each map@rate the closest record is taken (play levels with no
+ * fatigue: at Peak). It counts when the map's KEY skills (the ones getting 5%+ of its XP) are within 2 levels of
+ * the character's: the XP formula barely moves past level 100, and skills that win almost no notes on a map hardly
+ * change it. Speed Jam's and Memory's XP come from a record whose own two levels are within 2. `exact` when every
+ * level is equal. Same sim version, under 7 days.
+ */
+export const officialPlaysFor = async (skills, generation, mods, minutes, mapIds, rates, playsOf, tol = 2) => {
+  const out = new Map();
+  const index = await loadOfficial();
+  if (!index.size || !index.db) return out;
+  const mine = officialLevels(skills, minutes, true).split(',');
+  const modsKey = MOD_ORDER.filter(m => (mods || []).includes(m)).join(',');
+  const SJM = [GAME_SKILLS.indexOf('speedjam'), GAME_SKILLS.indexOf('memory')];
+  const rateSet = new Set(rates.map(r => String(r)));
+  const forNine = new Map(), forSjm = new Map(), nineDist = new Map(), sjmDist = new Map();
+  const diff = (lv, i) => Math.abs(Number(lv[i]) - Number(mine[i]));
+  for (const key of index) {
+    const parts = key.split('|');
+    if (parts.length < 5 || parts[2] !== String(generation >= 2 ? 1 : 0)) continue;
+    const [id, rate, mk] = parts[3].split('@');
+    if (mk !== modsKey || !rateSet.has(rate) || !mapIds.has(Number(id))) continue;
+    if (Number(parts[4]) !== (playsOf.get(Number(id)) || 0)) continue;
+    const lv = parts[1].split(',');
+    const mr = `${id}@${rate}`;
+    // a first cut from the key alone (no skill more than 10 levels off), the closest record kept per map@rate
+    const nine = lv.map((v, i) => (SJM.includes(i) ? 0 : diff(lv, i)));
+    if (Math.max(...nine) <= 10) { const d = nine.reduce((t, v) => t + v, 0); if (!nineDist.has(mr) || d < nineDist.get(mr)) { nineDist.set(mr, d); forNine.set(mr, key); } }
+    const sd = Math.max(...SJM.map(i => diff(lv, i)));
+    if (sd <= tol && (!sjmDist.has(mr) || sd < sjmDist.get(mr))) { sjmDist.set(mr, sd); forSjm.set(mr, key); }
+  }
+  const want = [...new Set([...forNine.values(), ...forSjm.values()])];
+  const recs = new Map();
+  await new Promise((ok) => {
+    const st = index.db.transaction('plays', 'readonly').objectStore('plays');
+    let left = want.length;
+    if (!left) ok();
+    for (const k of want) { const q = st.get(k); q.onsuccess = () => { recs.set(k, q.result); if (!--left) ok(); }; q.onerror = () => { if (!--left) ok(); }; }
+  });
+  const mean = (rec, sk) => { const ss = (rec.samples || []).filter(x => x && x.passed !== false); return ss.length ? ss.reduce((t, x) => t + num(x.xp && x.xp[sk]), 0) / ss.length : 0; };
+  const ok = (rec) => rec && num(rec.at) >= Date.now() - OFFICIAL_KEEP_MS && Array.isArray(rec.samples) && rec.samples.length;
+  const ez = (mods || []).includes('EZ') ? 0.5 : 1, hr = (mods || []).includes('HR');
+  for (const [mr, key] of forNine) {
+    const rec = recs.get(key);
+    if (!ok(rec)) continue;
+    // its key skills (5%+ of its XP) must be within 2 levels of yours
+    const lv = key.split('|')[1].split(','), tot = GAME_SKILLS.filter(sk => sk !== 'speedjam' && sk !== 'memory').reduce((t, sk) => t + mean(rec, sk), 0);
+    if (!(tot > 0)) continue;
+    if (GAME_SKILLS.some((sk, i) => !SJM.includes(i) && mean(rec, sk) / tot >= 0.05 && diff(lv, i) > tol)) continue;
+    const sj = forSjm.get(mr) && recs.get(forSjm.get(mr));
+    const xp = {};
+    for (const sk of GAME_SKILLS) {
+      const src = sk === 'speedjam' || sk === 'memory' ? (ok(sj) ? sj : null) : rec;
+      xp[sk] = src ? mean(src, sk) * ez * (sk === 'accuracy' && hr ? 1.1 : 1) : 0;
+    }
+    const passed = rec.samples.some(x => x && x.passed !== false);
+    const exact = nineDist.get(mr) === 0 && sjmDist.get(mr) === 0;
+    out.set(mr, { xp, passed, exact, strained: rec.samples.reduce((t, x) => t + num(x && x.strained), 0) / rec.samples.length });
+  }
+  return out;
+};
+let officialIndex = null;
+const officialValues = new Map();
+export const officialStats = { keys: 0, versions: [], hits: 0, misses: 0, error: '' };
+
+// ---------------------------------------------------------------------
+// The shared sim cache (cache.oss.idle.rhythmgamers.net, made for add-ons): every play the official sim servers
+// make is kept there, one per skillset. Asked first, a batch of maps a request at the character's play levels; only
+// what it doesn't have goes to the simulator. At most 60 lookups a minute (we keep to 55). Its XP is at x1: times the
+// skill's own multiplier (upgrades, overdrive, prestige) and, for physical skills, the fatigue XP factor; mods are in.
+// Memory: it keeps a map only never played or played 68+ times.
+// ---------------------------------------------------------------------
+export const SHARED_CACHE_URL = 'https://cache.oss.idle.rhythmgamers.net';
+export const sharedStats = { lookups: 0, rows: 0, hits: 0, error: '' };
+const sharedRows = new Map(), sharedAsked = new Set(), lookupTimes = [];
+const learnedOf = (plays) => (plays <= 0 ? false : plays >= 68 ? true : undefined);
+const ownMult = (s) => { const od = num(s && s.overdrive), odM = od <= 0 ? 1 : Math.max(1, Math.min(od, 2.5 * Math.pow(od, Math.log10(2)))); return (1 + 0.1 * num(s && s.upgrades) * odM) * Math.pow(1.1, num(s && s.prestige)); };
+const lookupSlot = async () => {
+  for (;;) {
+    const now = Date.now();
+    while (lookupTimes.length && now - lookupTimes[0] > 60000) lookupTimes.shift();
+    if (lookupTimes.length < 55) { lookupTimes.push(now); return; }
+    await sleep(60000 - (now - lookupTimes[0]) + 50);
+  }
+};
+/** Asks the shared cache about `ids` at play levels `levels` (the 11 joined, as officialLevels gives them). */
+export const sharedLookup = async (generation, levels, ids, mods = []) => {
+  const want = [...new Set(ids)].filter(id => !sharedAsked.has(`${generation}|${levels}|${id}`));
+  if (!want.length || typeof fetch === 'undefined') return;
+  const lv = levels.split(',').map(Number), body = Object.fromEntries(GAME_SKILLS.map((sk, i) => [sk, lv[i]]));
+  for (let i = 0; i < want.length; i += 200) {
+    const chunk = want.slice(i, i + 200);
+    for (const id of chunk) sharedAsked.add(`${generation}|${levels}|${id}`);
+    try {
+      await lookupSlot();
+      const res = await fetch(`${SHARED_CACHE_URL}/lookup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ generation, levels: body, beatmap_ids: chunk, mods }) });
+      sharedStats.lookups++;
+      if (!res.ok) { sharedStats.error = `answered ${res.status}`; continue; }
+      const { columns, rows } = await res.json();
+      const at = Object.fromEntries((columns || []).map((c, k) => [c, k]));
+      if (at.strained_minutes === undefined || at.xp === undefined) continue;
+      for (const row of rows || []) {
+        const mk = MOD_ORDER.filter(m => (row[at.mods] || []).includes(m)).join(',');
+        sharedRows.set(`${generation}|${levels}|${row[at.beatmap_id]}@${row[at.rate]}@${mk}@${row[at.learned] ? 1 : 0}`, Object.fromEntries(columns.map((c, k) => [c, row[k]])));
+        sharedStats.rows++;
+      }
+      sharedStats.error = '';
+    } catch (e) { sharedStats.error = String(e && e.message ? e.message : e); }
+  }
+};
+/** For the library: every play the shared cache has at the character's play levels (`minutes` in), for `ids` at
+ *  `rates`, by map@rate, in the simulator's terms. */
+export const sharedPlaysFor = async (skills, generation, mods, minutes, ids, rates, playsOf) => {
+  const out = new Map();
+  const levels = officialLevels(skills, minutes);
+  await sharedLookup(generation, levels, ids, mods);
+  const tired = fatigueXp(fatigueLevel(minutes)), mk = MOD_ORDER.filter(m => (mods || []).includes(m)).join(',');
+  for (const id of ids) {
+    const learned = learnedOf(playsOf.get(id) || 0);
+    if (learned === undefined) continue;
+    for (const rate of rates) {
+      const row = sharedRows.get(`${generation}|${levels}|${id}@${rate}@${mk}@${learned ? 1 : 0}`);
+      if (!row || row.passed === false) continue;
+      out.set(`${id}@${rate}`, { xp: Object.fromEntries(Object.entries(row.xp || {}).map(([sk, v]) => [sk, num(v) * ownMult(skills[sk]) * (PHYSICAL.includes(sk) ? tired : 1)])), passed: true, exact: true, strained: num(row.strained_minutes) });
+    }
+  }
+  return out;
+};
+/** The shared cache's play for this exact one, in the simulator's terms, or null. `ids`: the maps to ask about together. */
+const sharedAnswer = async (skills, generation, beatmapId, rate, mods, minutes, plays, ids) => {
+  const learned = learnedOf(plays);
+  if (learned === undefined || (mods || []).includes('NF')) return null;
+  const levels = officialLevels(skills, minutes);
+  await sharedLookup(generation, levels, ids && ids.length ? ids : [beatmapId], mods);
+  const row = sharedRows.get(`${generation}|${levels}|${beatmapId}@${rate}@${MOD_ORDER.filter(m => (mods || []).includes(m)).join(',')}@${learned ? 1 : 0}`);
+  if (!row) return null;
+  const tired = fatigueXp(fatigueLevel(minutes));
+  const xp = Object.fromEntries(Object.entries(row.xp || {}).map(([sk, v]) => [sk, num(v) * ownMult(skills[sk]) * (PHYSICAL.includes(sk) ? tired : 1)]));
+  sharedStats.hits++;
+  return { xp: row.passed === false ? {} : xp, passed: row.passed !== false, strained_minutes: num(row.strained_minutes), fail_seconds: row.fail_seconds ?? undefined, fail_progress: row.fail_progress ?? undefined, shared: true };
+};
+/** Reads the official sim's keys once (the values when asked for), keeping only the recent ones' versions. */
+const loadOfficial = async () => {
+  if (officialIndex) return officialIndex;
+  officialIndex = new Set();
+  try {
+    if (typeof indexedDB === 'undefined') return officialIndex;
+    const dbs = indexedDB.databases ? await indexedDB.databases() : [{ name: 'oss-idle-sim' }];
+    if (!dbs.some(d => d.name === 'oss-idle-sim')) return officialIndex;
+    const db = await new Promise((ok, no) => { const q = indexedDB.open('oss-idle-sim'); q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error); q.onupgradeneeded = () => { q.transaction.abort(); no(new Error('no store')); }; });
+    if (!db.objectStoreNames.contains('plays')) { db.close(); return officialIndex; }
+    const keys = await new Promise((ok, no) => { const q = db.transaction('plays', 'readonly').objectStore('plays').getAllKeys(); q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error); });
+    for (const k of keys) officialIndex.add(String(k));
+    officialIndex.db = db;
+    officialStats.keys = officialIndex.size;
+    officialStats.versions = [...new Set(keys.map(k => String(k).split('|')[0]))];
+  } catch (e) { officialStats.error = String(e && e.message ? e.message : e); }
+  return officialIndex;
+};
+/** The official sim's answer for this exact play, as the simulator would give it, or null. Run `run` of its samples. */
+const officialAnswer = async (skills, generation, beatmapId, rate, mods, minutes, plays, run) => {
+  const index = await loadOfficial();
+  if (!index.size || !index.db) return null;
+  const levels = officialLevels(skills, minutes);
+  const modsKey = MOD_ORDER.filter(m => (mods || []).includes(m)).join(',');
+  for (const version of officialStats.versions) {
+    const key = `${version}|${levels}|${generation >= 2 ? 1 : 0}|${beatmapId}@${rate}@${modsKey}|${plays}`;
+    if (!index.has(key)) continue;
+    let rec = officialValues.get(key);
+    if (rec === undefined) {
+      rec = await new Promise((ok) => { const q = index.db.transaction('plays', 'readonly').objectStore('plays').get(key); q.onsuccess = () => ok(q.result || null); q.onerror = () => ok(null); });
+      officialValues.set(key, rec);
+    }
+    if (!rec || !(num(rec.at) >= Date.now() - OFFICIAL_KEEP_MS) || !Array.isArray(rec.samples) || !rec.samples.length) continue;
+    const sample = rec.samples[run % rec.samples.length];
+    if (!sample || sample.passed === false) continue;
+    const tired = fatigueXp(fatigueLevel(minutes));
+    const ez = (mods || []).includes('EZ') ? 0.5 : 1, nf = (mods || []).includes('NF');
+    if (nf) return null;
+    const xp = Object.fromEntries(Object.entries(sample.xp || {}).map(([sk, v]) => [sk, num(v) * ez * (sk === 'accuracy' && (mods || []).includes('HR') ? 1.1 : 1) * (PHYSICAL.includes(sk) ? tired : 1)]));
+    officialStats.hits++;
+    return { xp, passed: true, strained_minutes: num(sample.strained), official: true };
+  }
+  officialStats.misses++;
+  return null;
 };
 
 /** Maps that give any Speed Jam or Memory XP: their next `count` plays, one at a time, at the strain
@@ -306,11 +595,15 @@ export async function forecast(queue, ctx, onProgress, token) {
 
   const mapIds = [...new Set(queue.entries.map(e => e.beatmapId))];
   const genetics = geneticsXpOf(ctx.geneSource ? ctx.geneSource.genetics : row.geneticsJson);
+  // a what-if (Suggestions) reuses what the last scan read: Tries, calibration, medals and the day's plays are the
+  // same for every variant of the queue, and reading them again (server requests, database reads) is what's slow
+  const reuse = ctx.reuse || null;
   // Tries: the server's when it answers, else counted from this computer's plays as the game does for guests
-  const memoryLocal = await memoryPlays(row, mapIds);
-  const fromServer = await serverTries(row, mapIds);
+  const memoryLocal = reuse && reuse.memoryLocal ? reuse.memoryLocal : await memoryPlays(row, mapIds);
+  const fromServer = reuse && reuse.memory ? null : await serverTries(row, mapIds);
   const memory = {}, triesFrom = {};
   for (const id of mapIds) {
+    if (reuse && reuse.memory && reuse.memory[id] !== undefined) { memory[id] = reuse.memory[id]; triesFrom[id] = (reuse.triesFrom || {})[id] || 'local'; continue; }
     const server = fromServer ? fromServer[id] : undefined;
     memory[id] = server ?? memoryLocal[id];
     triesFrom[id] = server !== undefined ? 'server' : 'local';
@@ -340,22 +633,31 @@ export async function forecast(queue, ctx, onProgress, token) {
   /** One run: a play is random, so each run is asked for and kept on its own (run 0 as before runs existed). */
   /** Diagnostics: the simulator's calls this scan: time spent, the slowest, busy answers retried, failures. */
   const simStats = { ms: 0, slowest: 0, busy: 0, failed: 0 };
+  /** Where a forecast's time goes (for the Suggestions' timing line): exact cache hits, building the index of
+   *  stored answers, nearest-answer lookups, new simulator calls. */
+  const timing = { exact: 0, official: 0, indexMs: 0, indexBuilds: 0, nearMs: 0, near: 0, calls: 0 };
   const askRun = async (asOwner, asSkills, beatmapId, r, m, bucket, playsKey, run) => {
     const key = `${beatmapId}|${r}|${[...m].sort().join('')}|${bucket}|${playsKey}${run ? `|#${run}` : ''}`;
     const kept = cached(asOwner, key);
-    if (kept) { fromCache++; return { answer: kept, fresh: false }; }
+    if (kept) { fromCache++; timing.exact++; return { answer: kept, fresh: false }; }
+    // the shared sim cache may have this very play (every official simulation, anyone's), asked with the queue's maps
+    const sh = await sharedAnswer(asSkills, num(row.generation) || 1, beatmapId, r, m, bucket, playsKey, mapIds);
+    if (sh) { fromCache++; timing.official++; remember(asOwner, key, sh); return { answer: sh, fresh: false }; }
+    // the official sim add-on may have simulated this very play already
+    const off = await officialAnswer(asSkills, num(row.generation) || 1, beatmapId, r, m, bucket, playsKey, run || 0);
+    if (off) { fromCache++; timing.official++; remember(asOwner, key, off); return { answer: off, fresh: false }; }
     if (approxOn) {
-      if (!approxIndex) approxIndex = answerIndex(num(row.id));
+      if (!approxIndex) { const t0 = performance.now(); approxIndex = answerIndex(num(row.id)); timing.indexMs += performance.now() - t0; timing.indexBuilds++; }
+      const t1 = performance.now();
       const near = nearestAnswer(approxIndex, asOwner, beatmapId, r, m, bucket, playsKey, run || 0);
+      timing.nearMs += performance.now() - t1; timing.near++;
       if (near) { fromCache++; return { answer: near, fresh: false, approx: true }; }
     }
     const askKey = `${asOwner}|${key}`;
     const fresh = !asks.has(askKey);
     if (fresh) {
       asks.set(askKey, (async () => {
-        const wait = Math.max(0, nextCall - Date.now());
-        nextCall = Date.now() + wait + CALL_SPACING_MS;
-        if (wait) await sleep(wait);
+        await callSlot();
         if (runToken !== scanToken) throw new Error('stopped');
         let answer;
         for (let attempt = 0; ; attempt++) {
@@ -381,12 +683,14 @@ export async function forecast(queue, ctx, onProgress, token) {
             // busy: this call waits, and every call after it waits too, so the server gets a break
             const pause = RETRY_WAITS_MS[attempt];
             nextCall = Math.max(nextCall, Date.now() + pause + CALL_SPACING_MS);
+            pauseCalls(pause);
             if (ctx.onRetry) ctx.onRetry(attempt + 1, RETRY_WAITS_MS.length, pause);
             const until = Date.now() + pause;
             while (Date.now() < until) { if (runToken !== scanToken) throw new Error('stopped'); await sleep(250); }
           }
         }
         calls++;
+        timing.calls++;
         onProgress(progress());
         remember(asOwner, key, answer);
         return answer;
@@ -427,7 +731,7 @@ export async function forecast(queue, ctx, onProgress, token) {
   const simulate = async (...args) => (await simulateWith(...args)).answer;
 
   // the XP that levels the character up is the real one: calibrate first, on the character's real plays
-  const calib = await calibrate(row, queue, {
+  const calib = reuse && reuse.calib ? reuse.calib : await calibrate(row, queue, {
     startMinutes,
     rate,
     // a real play's Tries then: this computer's count then, moved by how far the server's is from it now
@@ -445,12 +749,14 @@ export async function forecast(queue, ctx, onProgress, token) {
     stopped: () => runToken !== scanToken,
   });
   // medals from the server; when it can't be reached, each skill's bonus as learned from the real plays
-  const medals = await medalsOf(row);
+  const medals = reuse && reuse.medals ? reuse.medals : await medalsOf(row);
   const bonusOf = (sk) => (medals.ok ? medals.multiplier : calib.factors[sk] > 0 ? calib.factors[sk] : 1) * genetics[sk].total;
   const gainOf = (answer, sk, block) => num(answer.xp && answer.xp[sk]) * (MINDBLOCK.has(sk) ? block : 1) * bonusOf(sk);
   // mindblock's count: the last 50 plays within a day, then the forecast's own plays
   const nowMs = Date.now();
-  const recent = (await playsSince(row, nowMs - DAY_MS)).slice(-RECENT_LIMIT);
+  // a copy each time: the forecast adds its own plays to it as it goes
+  const recent = reuse && reuse.recent ? reuse.recent.slice() : (await playsSince(row, nowMs - DAY_MS)).slice(-RECENT_LIMIT);
+  const recentAtStart = recent.slice();
   const recentStart = recent.length;
   const recentByMap = Object.fromEntries(mapIds.map(id => [id, recent.filter(x => x.id === id).length]));
 
@@ -462,6 +768,7 @@ export async function forecast(queue, ctx, onProgress, token) {
   let loopSec = 0, loopDrift = 0;
   for (let i = 0; t < endSec && plays.length < MAX_PLAYS; i++) {
     if (token !== scanToken) throw new Error('stopped');
+    await breathe();
     const at = i < first.length ? first[i] : loop[(i - first.length) % loop.length];
     const entry = queue.entries[at];
     const before = restedFatigue(fatigue, t * 1000, genes, gear);
@@ -509,6 +816,8 @@ export async function forecast(queue, ctx, onProgress, token) {
   skills = startSkills;
   owner = startOwner;
   return {
+    timing: { ...timing, simMs: simStats.ms },
+    recentPlays: recentAtStart,
     plays, samples, knots, loopSec, loopDrift, loopPlays: loop.length, loopStart: loopFrom ? loopFrom.plays : 0, memory, memoryLocal, triesFrom, calib, medals, genetics, recentStart, recentByMap, simStats, runs,
     simulate, counts: () => ({ calls, fromCache }), useToken: (t) => { runToken = t; },
     /** A quick update keeps borrowing stored answers through the Speed Jam / Memory curves, then stops. */

@@ -13,7 +13,7 @@ export const CSS = `
 #qs-window * { box-sizing:border-box; }
 /* until the first scan: the controls alone, in a window no wider than they need */
 /* the Levels tab */
-#qs-window table.qs-lv td { vertical-align:middle; padding-top:5px; padding-bottom:4px; }
+#qs-window table.qs-lv td { vertical-align:middle; padding-top:6px; padding-bottom:10px; }
 /* the bar sits centred on the skill beside it: room above it as tall as its labels under it (less what marks above it take) */
 #qs-window table.qs-lv .qs-lv-bar { margin-top:12px; }
 #qs-window table.qs-lv .qs-lv-bar.ups { margin-top:1px; }
@@ -55,6 +55,15 @@ export const CSS = `
 #qs-window .qs-lv-uplbl { position:absolute; font-size:9px; line-height:11px; color:#fbbf24; font-weight:600; white-space:nowrap; cursor:help; z-index:1; }
 #qs-window .qs-lv-uplbl.above { top:-12px; }
 /* the upgrades after the next one, faint: arrows over or under the bar, or their own lines with the numbers to each side */
+#qs-window .qs-sg-end { flex:none; min-width:200px; text-align:center; padding:6px 10px; }
+#qs-window .qs-sg-role { font-size:10px; border-radius:6px; padding:0 5px; margin-left:4px; font-weight:600; }
+#qs-window .qs-sg-role.warms { color:#fb923c; border:1px solid rgba(251,146,60,.5); }
+#qs-window .qs-sg-role.holds { color:#4ade80; border:1px solid rgba(74,222,128,.5); }
+#qs-window .qs-sg-role.cools { color:#60a5fa; border:1px solid rgba(96,165,250,.5); }
+#qs-window .qs-sg-swap { color:#93c5fd; font-weight:700; display:inline-block; width:14px; }
+#qs-window .qs-sg-swap-2 { display:inline-block; width:18px; }
+#qs-window .qs-sg-rates { margin-top:4px; font-size:11px; line-height:15px; font-variant-numeric:tabular-nums; }
+#qs-window .qs-sg-endstate { font-size:15px; font-weight:700; margin-top:2px; }
 #qs-window .qs-lv-laterbox { position:absolute; left:0; right:0; top:3px; height:9px; pointer-events:none; }
 #qs-window .qs-lv-bar.ups .qs-lv-laterbox { top:14px; }
 #qs-window .qs-lv-later { position:absolute; transform:translateX(-50%); font-size:9px; line-height:10px; color:rgba(251,191,36,.45); white-space:nowrap; cursor:help; pointer-events:auto; display:flex; flex-direction:column; align-items:center; }

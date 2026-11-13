@@ -151,12 +151,14 @@ export const wireSlider = (box, ahead) => {
     ghost.style.left = `${(at.bar * 100).toFixed(2)}%`;
     ghost.style.display = slideSec > 0 ? '' : 'none';
     // while it's on, the forecast arrow and its end line step aside for the ghost needle
-    if (barEl) barEl.classList.toggle('sliding', slideSec > 0);
+    if (barEl && barEl.classList.contains('sliding') !== slideSec > 0) barEl.classList.toggle('sliding', slideSec > 0);
     text.innerHTML = slideSec > 0
       ? `After ${durH(slideSec)}: <b>${Math.round(at.bar * 100)}%</b> · ${STAGES[stageOf(at.bar)][0]}${kept < 0.995 ? ` · <span style="color:${keptColor(kept)}">-${Math.round((1 - kept) * 100)}% physical XP</span>` : ''}`
       : '';
   };
-  input.addEventListener('input', update);
+  // dragging sends many input events: draw once a frame
+  let pending = false;
+  input.addEventListener('input', () => { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; update(); }); });
   update();
 };
 
@@ -173,7 +175,7 @@ export const graphHtml = (samples, endSec) => {
     <rect x="0" y="${y(BAR_ZONES[1])}" width="${W}" height="${y(BAR_ZONES[0]) - y(BAR_ZONES[1])}" fill="rgba(232,193,71,.16)"/>
     <rect x="0" y="0" width="${W}" height="${y(BAR_ZONES[2])}" fill="rgba(192,132,252,.10)"/>
     ${hoursMarks.join('')}
-    <text x="3" y="${y(BAR_ZONES[1]) + 10}" fill="#e8c147" font-size="9" opacity=".8">sweet spot</text>
+    <text x="3" y="${y(BAR_ZONES[1]) + 10}" fill="#e8c147" font-size="9" opacity=".8">peak</text>
     <line x1="0" x2="${W}" y1="${y(XP_CUT)}" y2="${y(XP_CUT)}" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="4 3"/>
     <text x="3" y="${y(XP_CUT) - 3}" fill="#f87171" font-size="9">300 min: XP cut</text>
     <polyline points="${pts}" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
@@ -211,7 +213,7 @@ export const logRead = () => {
   try { return localStorage.getItem(LOG_READ_KEY) === logId(); } catch (_) { return false; }
 };
 export const changelogHtml = () => {
-  const read = logRead();
+  const read = logRead() || CHANGELOG.notify === false;
   return `<span class="qs-notice qs-log ${read ? 'none' : 'new'}">
     <button type="button" aria-label="Changelog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/><path d="M3.5 6h.01"/><path d="M3.5 12h.01"/><path d="M3.5 18h.01"/></svg></button>
     <span class="qs-notice-pop"><b>What's new</b>${esc(CHANGELOG.text || '')}${read
@@ -228,6 +230,7 @@ export const hotfixHtml = () => {
   if (!HOTFIXES.text) return '';
   let read = false;
   try { read = localStorage.getItem(HOTFIX_READ_KEY) === hotfixId(); } catch (_) {}
+  if (HOTFIXES.notify === false) read = true;
   return `<span class="qs-notice qs-hotfix ${read ? 'none' : 'new'}">
     <button type="button" aria-label="Hotfixes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></button>
     <span class="qs-notice-pop"><b>Hotfixes</b>${esc(HOTFIXES.text)}${read
