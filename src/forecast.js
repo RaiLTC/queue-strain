@@ -1,7 +1,7 @@
 // The forecast: simulating the queue play by play, the cache, calibration and the local estimate.
 
 import { SETTINGS } from './config.js';
-import { MINDBLOCK, RECENT_LIMIT, SKILLS, gameRows, logProblem, medalsOf, memoryPlays, mindblockFactor, num, playsSince, recentPlaysOf, serverTries } from './game.js';
+import { MINDBLOCK, RECENT_LIMIT, SKILLS, allowedRate, rateAllowed, clearWaiting, fetchT, logPerf, setWaiting, withTimeout, gameRows, logProblem, medalsOf, memoryPlays, mindblockFactor, num, playsSince, recentPlaysOf, serverTries } from './game.js';
 import { LEAD_IN_MS, PHYSICAL, STRAIN_CAP, afterPlay, barKnots, barOf, fatigueLevel, fatigueXp, gainLevels, lerp, restedFatigue, warmup, warmupTrend, xpForLevel } from './rules/fatigue.js';
 import { DAY_MS, geneticsXpOf, recall } from './rules/genes.js';
 import { scanToken } from './ui/window.js';
@@ -27,7 +27,13 @@ export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // Long runs of answers already known come back without ever letting the game draw a frame: every ~10ms, step aside
 // for a moment so the game stays smooth.
 let lastYield = 0;
-export const breathe = async () => { const now = performance.now(); if (now - lastYield > 10) { await new Promise(r => setTimeout(r, 0)); lastYield = performance.now(); } };
+// scheduler.yield where there is one; else a MessageChannel task (setTimeout 0 waits at least 4ms once nested)
+const yieldNow = (() => {
+  if (typeof scheduler !== 'undefined' && scheduler && typeof scheduler.yield === 'function') return () => scheduler.yield();
+  if (typeof MessageChannel !== 'undefined') { const ch = new MessageChannel(), q = []; ch.port1.onmessage = () => { const r = q.shift(); if (r) r(); }; return () => new Promise(r => { q.push(r); ch.port2.postMessage(0); }); }
+  return () => new Promise(r => setTimeout(r, 0));
+})();
+export const breathe = async () => { const now = performance.now(); if (now - lastYield > 4) { await yieldNow(); lastYield = performance.now(); } };
 // One limit for every simulator call the add-on makes, from anywhere (scans, Suggestions, the library, all at once):
 // at most one every CALL_SPACING_MS and 1,100 a minute, under the server's 1,200 a minute a player. A busy answer
 // (429) pauses them all for as long as the server asks.
@@ -39,7 +45,9 @@ export const callSlot = async () => {
     const now = Date.now();
     while (callTimes.length && now - callTimes[0] > 60000) callTimes.shift();
     const wait = Math.max(pausedUntil - now, lastCall + CALL_SPACING_MS - now, callTimes.length >= 1100 ? 60000 - (now - callTimes[0]) + 20 : 0);
-    if (wait <= 0) { callTimes.push(now); lastCall = now; return; }
+    if (wait <= 0) { callTimes.push(now); lastCall = now; clearWaiting('simulator busy'); clearWaiting('simulator limit (1,100 a minute)'); return; }
+    if (pausedUntil > now) setWaiting('simulator busy', pausedUntil);
+    else if (wait > 1000) setWaiting('simulator limit (1,100 a minute)', now + wait);
     await sleep(Math.max(5, wait));
   }
 };
@@ -328,7 +336,8 @@ const lookupSlot = async () => {
   for (;;) {
     const now = Date.now();
     while (lookupTimes.length && now - lookupTimes[0] > 60000) lookupTimes.shift();
-    if (lookupTimes.length < 55) { lookupTimes.push(now); return; }
+    if (lookupTimes.length < 55) { lookupTimes.push(now); clearWaiting('shared cache limit (55 a minute)'); return; }
+    setWaiting('shared cache limit (55 a minute)', lookupTimes[0] + 60000);
     await sleep(60000 - (now - lookupTimes[0]) + 50);
   }
 };
@@ -345,7 +354,7 @@ export const sharedLookup = async (generation, levels, ids, mods = [], sink = nu
     if (!sink) { for (const id of chunk) sharedAsked.add(`${generation}|${levels}|${id}`); trimOldest(sharedAsked, SHARED_KEEP); }
     try {
       await lookupSlot();
-      const res = await fetch(`${SHARED_CACHE_URL}/lookup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ generation, levels: body, beatmap_ids: chunk, mods }) });
+      const res = await fetchT(`${SHARED_CACHE_URL}/lookup`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ generation, levels: body, beatmap_ids: chunk, mods }) });
       sharedStats.lookups++;
       if (!res.ok) { sharedStats.error = `answered ${res.status}`; continue; }
       const { columns, rows } = await res.json();
@@ -402,7 +411,7 @@ const loadOfficial = async () => {
     if (typeof indexedDB === 'undefined') return officialIndex;
     const dbs = indexedDB.databases ? await indexedDB.databases() : [{ name: 'oss-idle-sim' }];
     if (!dbs.some(d => d.name === 'oss-idle-sim')) return officialIndex;
-    const db = await new Promise((ok, no) => { const q = indexedDB.open('oss-idle-sim'); q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error); q.onupgradeneeded = () => { q.transaction.abort(); no(new Error('no store')); }; });
+    const db = await withTimeout(new Promise((ok, no) => { const q = indexedDB.open('oss-idle-sim'); q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error); q.onblocked = () => no(new Error('busy (the sim add-on is updating it)')); q.onupgradeneeded = () => { q.transaction.abort(); no(new Error('no store')); }; }), 5000, 'opening the official sim\'s records');
     if (!db.objectStoreNames.contains('plays')) { db.close(); return officialIndex; }
     const keys = await new Promise((ok, no) => { const q = db.transaction('plays', 'readonly').objectStore('plays').getAllKeys(); q.onsuccess = () => ok(q.result); q.onerror = () => no(q.error); });
     officialIndex.byMap = new Map();
@@ -539,7 +548,9 @@ export async function calibrate(row, queue, { startMinutes, rate, triesOffset = 
       }
       const r = num(x.rate) || 1;
       const m = String(x.mods || '').split(',').map(v => v.trim()).filter(Boolean);
+      if (!rateAllowed(r, row)) { out.skippedRates = (out.skippedRates || 0) + 1; continue; }
       const answer = await simulateAs(id, r, m, startMinutes, tries, levelsThen);
+      if (!answer || answer.rejected) { out.skippedRejected = (out.skippedRejected || 0) + 1; continue; }
       const sim = answer.xp || {};
       const recentThen = recentPlaysOf(allPlays, id, at);
       const block = mindblockFactor(recentThen);
@@ -663,7 +674,7 @@ export async function forecast(queue, ctx, onProgress, token) {
    *  from the cache, from a call already on its way, or with a new call in its turn. */
   /** One run: a play is random, so each run is asked for and kept on its own (run 0 as before runs existed). */
   /** Diagnostics: the simulator's calls this scan: time spent, the slowest, busy answers retried, failures. */
-  const simStats = { ms: 0, slowest: 0, busy: 0, failed: 0 };
+  const simStats = { ms: 0, slowest: 0, busy: 0, failed: 0, rejected: 0 };
   /** Where a forecast's time goes (for the Suggestions' timing line): exact cache hits, building the index of
    *  stored answers, nearest-answer lookups, new simulator calls. */
   const timing = { exact: 0, official: 0, indexMs: 0, indexBuilds: 0, nearMs: 0, near: 0, calls: 0, reused: 0 };
@@ -694,10 +705,10 @@ export async function forecast(queue, ctx, onProgress, token) {
         for (let attempt = 0; ; attempt++) {
           const t0 = performance.now();
           try {
-            answer = await api.simulate({
+            answer = await withTimeout(api.simulate({
               beatmap_id: beatmapId, rate: r, mods: m, generation: num(row.generation) || 1,
               strain_minutes: bucket, map_plays: playsKey, skills: asSkills,
-            });
+            }), 20000, 'a simulator call');
             const ms = performance.now() - t0;
             simStats.ms += ms;
             simStats.slowest = Math.max(simStats.slowest, ms);
@@ -728,7 +739,15 @@ export async function forecast(queue, ctx, onProgress, token) {
       // a call that failed for good is asked again next time, not kept as failed
       asks.get(askKey).catch(() => asks.delete(askKey));
     }
-    return { answer: await asks.get(askKey), fresh };
+    try {
+      return { answer: await asks.get(askKey), fresh };
+    } catch (e) {
+      if (runToken !== scanToken || /stopped/.test(String(e && e.message))) throw e;
+      simStats.rejected = (simStats.rejected || 0) + 1;
+      if (!approxIndex) approxIndex = answerIndex(num(row.id));
+      const near = nearestAnswer(approxIndex, asOwner, beatmapId, r, m, bucket, playsKey, run || 0);
+      return { answer: near ? { ...near, rejected: true } : { passed: true, strained_minutes: 0, xp: {}, rejected: true }, fresh: false, approx: true };
+    }
   };
   /** Ask the simulator about one play, `runs` times, and average the answers. */
   const runs = Math.min(5, Math.max(1, Math.round(num(ctx.runs)) || 1));
@@ -746,12 +765,13 @@ export async function forecast(queue, ctx, onProgress, token) {
       fail_seconds: fails.length ? mean(fails.map(a => num(a.fail_seconds))) : undefined,
       fail_progress: fails.length ? mean(fails.map(a => num(a.fail_progress))) : undefined,
       xp,
+      rejected: answers.some(a => a.rejected) || undefined,
     };
     return { answer, fresh: got.some(g => g.fresh), approx: got.some(g => g.approx) };
   };
   /** The simulator's answer for a play of the queue, and how it was got: `fresh` when this call went to the simulator. */
   const simulateWith = async (entry, minutes, mapPlays, exact = false) => {
-    const r = entry.lockedRate ?? rate;
+    const r = allowedRate(entry.lockedRate ?? rate, row);
     const m = entry.lockedRate === undefined ? mods : (entry.lockedMods || []);
     const bucket = Math.min(STRAIN_CAP, strainStep(minutes));
     const playsKey = exact ? Math.max(0, Math.round(mapPlays)) : playStep(mapPlays);

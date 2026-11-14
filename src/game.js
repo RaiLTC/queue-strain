@@ -9,6 +9,47 @@ import { DAY_MS, asGenetics, recall } from './rules/genes.js';
 export const SKILLS = ['accuracy', 'speed', 'stamina', 'jackspeed', 'coordination', 'release', 'reading', 'consistency', 'concentration', 'speedjam', 'memory'];
 export const num = (v) => (typeof v === 'number' ? v : Number(v) || 0);
 
+// ---- the speeds a character may play at (shared rate.ts): a 0.05 step each way per Speed upgrade, plus one per
+// Speed prestige (kept for good), within 0.5-1.5. The game holds a queue's speed to these: snapped to 0.05, clamped ----
+const r2 = (v) => Math.round(v * 100) / 100;
+export const rateUnlocks = (row) => Math.max(0, num(row && row.speedUpgrades) + num(row && row.speedPrestige));
+export const rateRange = (row) => { const u = rateUnlocks(row) * 0.05; return { lo: r2(Math.max(0.5, 1 - u)), hi: r2(Math.min(1.5, 1 + u)) }; };
+export const allowedRate = (rate, row) => { const { lo, hi } = rateRange(row); return r2(Math.min(hi, Math.max(lo, Math.round(num(rate || 1) / 0.05) * 0.05))); };
+export const rateAllowed = (rate, row) => Math.abs(allowedRate(rate, row) - num(rate || 1)) < 1e-6;
+export const rateSteps = (row) => { const { lo, hi } = rateRange(row), out = []; for (let x = Math.round(lo * 20); x <= Math.round(hi * 20); x++) out.push(r2(x / 20)); return out; };
+
+// ---- performance: what the add-on did and how long it took (Copy Diagnostics), and what it's waiting for ----
+/** The last 300 events: scans, Suggestions steps, the library, waits, timeouts, stalls, frames the game lost. */
+export const perfLog = [];
+const perfStart = Date.now();
+export const logPerf = (kind, text) => {
+  perfLog.push(`+${((Date.now() - perfStart) / 1000).toFixed(1)}s ${kind}: ${text}`);
+  if (perfLog.length > 300) perfLog.splice(0, perfLog.length - 300);
+};
+/** What the add-on is waiting for right now (shown while it runs): a reason and until when. */
+export const waiting = { what: '', until: 0 };
+export const setWaiting = (what, until) => { if (!waiting.what || waiting.what !== what) logPerf('wait', `${what} (${Math.max(0, Math.round((until - Date.now()) / 1000))}s)`); waiting.what = what; waiting.until = until; };
+export const clearWaiting = (what) => { if (!what || waiting.what === what) { waiting.what = ''; waiting.until = 0; } };
+export const waitingText = () => (waiting.what && waiting.until > Date.now() ? `Waiting: ${waiting.what}, ${Math.ceil((waiting.until - Date.now()) / 1000)}s` : '');
+/** `p`, or an error ("timed out") after `ms`: a request that never answers can't hold everything up. */
+export const withTimeout = (p, ms, what) => {
+  let timer;
+  return Promise.race([p, new Promise((_, no) => { timer = setTimeout(() => { logPerf('timeout', `${what} after ${ms / 1000}s`); no(new Error(`${what} timed out`)); }, ms); })]).finally(() => clearTimeout(timer));
+};
+/** fetch, given up after `ms`. */
+export const fetchT = (url, opts = {}, ms = 15000) => {
+  const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ac ? setTimeout(() => { logPerf('timeout', `${String(url).replace(/^https?:\/\//, '').split('?')[0]} after ${ms / 1000}s`); ac.abort(); }, ms) : 0;
+  return fetch(url, ac ? { ...opts, signal: ac.signal } : opts).finally(() => clearTimeout(timer));
+};
+/** Frames the game lost while something ran: long tasks (50ms+) from now until the returned stop() is called. */
+export const watchFrames = () => {
+  const lt = [];
+  let po = null;
+  try { po = new PerformanceObserver(l => { for (const e of l.getEntries()) lt.push(e.duration); }); po.observe({ entryTypes: ['longtask'] }); } catch (_) { po = null; }
+  return () => { try { if (po) po.disconnect(); } catch (_) {} return po ? `${lt.length} long tasks, longest ${Math.round(Math.max(0, ...lt))}ms, ${Math.round(lt.reduce((a, b) => a + b, 0))}ms in all` : 'long tasks not measured'; };
+};
+
 export async function gameRows(sql, params = []) {
   const db = window.db;
   if (!db || !db.read) return null;
@@ -56,7 +97,7 @@ export async function mapNames() {
   if (catalogNames) return catalogNames;
   const out = {};
   try {
-    const res = await fetch(`${API_URL}/v1/beatmap/catalog`);
+    const res = await fetchT(`${API_URL}/v1/beatmap/catalog`, {}, 30000);
     if (res.ok) {
       const walk = (v) => {
         if (!v || typeof v !== 'object') return;
@@ -262,7 +303,7 @@ export async function medalsOf(row) {
   if (medalsKept && medalsKept.id === id && Date.now() - medalsKept.at < 600000) return medalsKept.value;
   let value = { ok: false, multiplier: 1, held: 0, unknown: 0 };
   try {
-    const res = await fetch(`${API_URL}/v1/characters/${id}/medals`);
+    const res = await fetchT(`${API_URL}/v1/characters/${id}/medals`);
     if (res.ok) {
       const { held } = await res.json();
       const ids = (Array.isArray(held) ? held : []).map(m => (m && typeof m === 'object' ? m.id : m));
@@ -319,7 +360,7 @@ export async function memoryPlays(row, beatmapIds) {
 export async function geneticsFor(row) {
   if (!row.local) {
     try {
-      const res = await fetch(`${API_URL}/v1/me/characters`, { credentials: 'include' });
+      const res = await fetchT(`${API_URL}/v1/me/characters`, { credentials: 'include' });
       if (res.ok) {
         const list = await res.json();
         const dto = Array.isArray(list) ? list.find(c => c && num(c.id) === num(row.id)) : null;
@@ -341,7 +382,7 @@ export async function serverTries(row, beatmapIds) {
   const out = {};
   for (const id of beatmapIds) {
     try {
-      const res = await fetch(`${API_URL}/v1/me/memory/${id}`, { credentials: 'include' });
+      const res = await fetchT(`${API_URL}/v1/me/memory/${id}`, { credentials: 'include' });
       if (!res.ok) { logProblem('tries', `map ${id}: server answered ${res.status}`); if (res.status === 401 || res.status === 403) return null; continue; }
       const body = await res.json();
       if (typeof (body && body.plays) === 'number') out[id] = body.plays;
