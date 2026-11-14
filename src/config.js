@@ -11,15 +11,15 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.4.07';
+export const VERSION = '1.4.08';
 export const VERSION_ID = '2026-11-14 05H42M';
 
 // none / info / urgent
 export const NOTICE = {
   // its own id: a new one shows the notice again to players who read the old one
-  id: '2026-11-13 1.4.0',
-  mode: 'info',
-  text: `Scanning can make the game lag a little while it runs.\nSuggestions is at an early stage: it should get better with time.\nFound something off? Message me (Rai) in the in-game chat if online, or in the official oss!idle Discord`,
+  id: '2026-11-14 paused',
+  mode: 'urgent',
+  text: `Queue Strain is paused: no new features or fixes for now.\nI'm rebuilding it from scratch with a proper UI, and it'll come back as a new add-on.\nQuestions? Message me (Rai) in the in-game chat if online, or in the official oss!idle Discord`,
 };
 
 // the last big update. Kept exactly as released (id and text), so players who read it don't see it light up again.
