@@ -97,10 +97,10 @@ export const mount = (meta, host) => {
   let debugView = 'table', debugMap = 0;
   /** Suggestions: how hard to look (quick, balanced, thorough) and what for (all XP, or one skill's). */
   /** Suggestions: whether they may go past Peak, and the playlist name to write to. */
-  let sgPastPeak = false, sgBelowPeak = false, sgPlaylistName = 'Suggested Playlist', sgFocus = [], sgSinglesOpen = null;
+  let sgPastPeak = false, sgBelowPeak = false, sgToPeak = false, sgPlaylistName = 'Suggested Playlist', sgFocus = [], sgSinglesOpen = null;
   /** The library (Debug): being built, and the saved one for the character as it is. */
   let libRun = null, libSaved = null, libFor = '', libSkill = 'speed';
-  try { const sv = JSON.parse(localStorage.getItem('queue-strain:suggest') || '{}'); sgPastPeak = !!sv.pastPeak; if (typeof sv.playlist === 'string' && sv.playlist.trim()) sgPlaylistName = sv.playlist.trim(); if (Array.isArray(sv.focus)) sgFocus = sv.focus.filter(sk => SKILLS.includes(sk)); sgBelowPeak = !!sv.belowPeak; } catch (_) {}
+  try { const sv = JSON.parse(localStorage.getItem('queue-strain:suggest') || '{}'); sgPastPeak = !!sv.pastPeak; if (typeof sv.playlist === 'string' && sv.playlist.trim()) sgPlaylistName = sv.playlist.trim(); if (Array.isArray(sv.focus)) sgFocus = sv.focus.filter(sk => SKILLS.includes(sk)); sgBelowPeak = !!sv.belowPeak; sgToPeak = !!sv.toPeak; } catch (_) {}
   try {
     const saved = JSON.parse(localStorage.getItem('queue-strain:prefs') || '{}');
     if (saved.hours) hoursInput.value = wholeHours(saved.hours);
@@ -1478,6 +1478,7 @@ export const mount = (meta, host) => {
         <div class="qs-h">Suggestions</div>
         <div class="qs-dim" style="margin-bottom:6px;">Drop the maps that hold your queue back, repeat its best ones instead, or add a top performer that fits it: whatever gives the most XP an hour (to the skills you focus on, when you tick some) over the next ${aheadText}, without going past Peak. Estimates from plays already simulated; apply a change and rescan for the exact numbers.</div>
         <div class="qs-row" style="gap:8px; flex-wrap:wrap;">
+          <label class="qs-dim" style="display:flex; align-items:center; gap:4px;" title="For when you start in Cold, Warming Up or Fatigued: the suggested queue has to bring you into Peak, and the Peak limits only start once you're there. Queues that never reach Peak are left out."><input id="qs-sg-topeak" type="checkbox"${sgToPeak ? ' checked' : ''}${sg && sg.running ? ' disabled' : ''} style="margin:0;"> Get to Peak</label>
           <label class="qs-dim" style="display:flex; align-items:center; gap:4px;" title="Off: suggestions keep you within Peak once you've reached it. On: they may go into Pushing, never past the XP cut."><input id="qs-sg-pastpeak" type="checkbox"${sgPastPeak ? ' checked' : ''}${sg && sg.running ? ' disabled' : ''} style="margin:0;"> Allow past Peak</label>
           <label class="qs-dim" style="display:flex; align-items:center; gap:4px;" title="Off: once you've reached Peak, suggestions keep you from dropping back below it (Warming Up, Cold). On: they may let you cool down below Peak."><input id="qs-sg-belowpeak" type="checkbox"${sgBelowPeak ? ' checked' : ''}${sg && sg.running ? ' disabled' : ''} style="margin:0;"> Allow below Peak</label>
           ${sg && sg.running ? `<button type="button" class="qs-plain qs-suggest-stop">Stop</button><span class="qs-dim qs-sg-prog">${esc(sgProgText(sg))}</span>` : `<button type="button" class="qs-plain qs-suggest-run">${sg ? 'Check again' : 'Find suggestions'}</button>${sg ? `<span class="qs-dim">${sg.stopped ? 'Stopped' : 'Done'} · ${num(sg.done)} queues checked</span>` : ''}`}
@@ -1487,7 +1488,7 @@ export const mount = (meta, host) => {
         ${sg && sg.running ? `<div style="display:flex; gap:3px; margin-top:6px;" title="Steps 1-3 look for changes, steps 4-6 polish what they found. It ends early when nothing more helps.">${[1, 2, 3, 4, 5, 6].map(i => { const f = sgSegFrac(sg, i); return `<div style="flex:1; height:5px; border-radius:3px; background:rgba(255,255,255,0.12); overflow:hidden;"><div class="qs-sg-seg" style="width:${Math.round(f * 100)}%; height:100%; background:${i <= 3 ? '#60a5fa' : '#a78bfa'};"></div></div>`; }).join('')}</div>` : ''}
         <div style="display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:6px;" title="Ticked skills: suggestions get them the most XP they can, whatever the others get. None ticked: the most XP in all."><span class="qs-dim">Focus on</span>${SKILLS.map(sk => `<label class="qs-dim" style="display:flex; align-items:center; gap:3px;"><input class="qs-sg-focus" data-sk="${sk}" type="checkbox"${sgFocus.includes(sk) ? ' checked' : ''}${sg && sg.running ? ' disabled' : ''} style="margin:0;">${SKILL_NAMES[sk]}</label>`).join('')}</div>
         ${sg && sg.error ? `<div style="color:#fca5a5; margin-top:6px;">${esc(sg.error)}</div>` : ''}
-        ${sg && sg.baseCrossed && !sg.running ? `<div style="margin-top:8px; color:#f87171;">Your queue as it is ${sg.pastPeak && sg.belowPeak ? 'goes past the XP cut' : 'leaves Peak'}. The suggestions below keep you ${sg.pastPeak && sg.belowPeak ? 'under the XP cut' : 'within your limits'}.</div>` : ''}
+        ${sg && sg.baseCrossed && !sg.running ? `<div style="margin-top:8px; color:#f87171;">Your queue as it is ${sg.baseMissed ? 'doesn’t get you to Peak' : sg.pastPeak && sg.belowPeak ? 'goes past the XP cut' : 'leaves Peak'}. The suggestions below keep you ${sg.pastPeak && sg.belowPeak ? 'under the XP cut' : 'within your limits'}.</div>` : ''}
         ${sgBest}
         ${sgCompare}
         ${sgSingles}
@@ -1698,7 +1699,7 @@ export const mount = (meta, host) => {
         void openConsole({ loadPlayed, calibRows, calibSummary, diag });
       };
     }
-    const sgSave = () => { try { localStorage.setItem('queue-strain:suggest', JSON.stringify({ pastPeak: sgPastPeak, belowPeak: sgBelowPeak, playlist: sgPlaylistName, focus: sgFocus })); } catch (_) {} };
+    const sgSave = () => { try { localStorage.setItem('queue-strain:suggest', JSON.stringify({ pastPeak: sgPastPeak, belowPeak: sgBelowPeak, toPeak: sgToPeak, playlist: sgPlaylistName, focus: sgFocus })); } catch (_) {} };
     // the library: the saved one for this character's levels, loaded once, then drawn with it
     { const key = JSON.stringify([ctx.row.id, SKILLS.map(sk => [ctx.row[sk], ctx.row[`${sk}LifetimeXp`], ctx.row[`${sk}Prestige`], ctx.row[`${sk}Upgrades`]])]);
       if (libFor !== key) { libFor = key; libSaved = null; void loadLibrary(ctx.row).then(v => { if (v && libFor === key) { libSaved = v; if (lastResult && (activeTab === 'debug' || activeTab === 'suggest')) renderResult(...lastResult); } }); } }
@@ -1727,6 +1728,8 @@ export const mount = (meta, host) => {
     for (const box of outEl.querySelectorAll('.qs-sg-focus')) box.onchange = () => { sgFocus = [...outEl.querySelectorAll('.qs-sg-focus')].filter(b => b.checked).map(b => b.dataset.sk); sgSave(); };
     const sgBelowBox = outEl.querySelector('#qs-sg-belowpeak');
     if (sgBelowBox) sgBelowBox.onchange = () => { sgBelowPeak = sgBelowBox.checked; sgSave(); };
+    const sgToPeakBox = outEl.querySelector('#qs-sg-topeak');
+    if (sgToPeakBox) sgToPeakBox.onchange = () => { sgToPeak = sgToPeakBox.checked; sgSave(); };
     const sgPeakBox = outEl.querySelector('#qs-sg-pastpeak');
     if (sgPeakBox) sgPeakBox.onchange = () => { sgPastPeak = sgPeakBox.checked; sgSave(); };
     const sgName = outEl.querySelector('#qs-sg-plname');
@@ -1748,11 +1751,11 @@ export const mount = (meta, host) => {
     if (sgStop) sgStop.onclick = () => { if (r.suggest) { r.suggest.stop = true; renderResult(...lastResult); } };
     const sgBtn = outEl.querySelector('.qs-suggest-run');
     if (sgBtn) sgBtn.onclick = async () => {
-      const tok = scanToken, pastPeak = sgPastPeak, belowPeak = sgBelowPeak, H = Math.max(1, ctx.hours), focus = new Set(sgFocus);
+      const tok = scanToken, pastPeak = sgPastPeak, belowPeak = sgBelowPeak, toPeak = sgToPeak, H = Math.max(1, ctx.hours), focus = new Set(sgFocus);
       /** A skill's weight: focus skills count double, the rest normally. */
       /** What a play is worth: its focus skills' XP when some are ticked (the rest don't count), else all of it. */
       const worth = (p) => (focus.size ? [...focus].reduce((t, sk) => t + xpOf(p, sk), 0) : totalOf(p));
-      const s = r.suggest = { running: true, done: 0, note: 'Starting', pastPeak, belowPeak, singles: [], best: null };
+      const s = r.suggest = { running: true, done: 0, note: 'Starting', pastPeak, belowPeak, toPeak, singles: [], best: null };
       renderResult(...lastResult);
       const alive = () => tok === scanToken && lastResult[3] === r && !s.stop;
       s.step = 0; s.stepDone = 0; s.stepTotal = 0;
@@ -1786,11 +1789,21 @@ export const mount = (meta, host) => {
       const measure = (res) => {
         const limit = pastPeak ? XP_CUT : BAR_ZONES[1];
         let xp = 0, wx = 0, under = false, crossed = false, reached = false, mins = 0, outMins = 0;
+        // Get to Peak: until the queue first brings you into Peak, the limits don't apply yet; how close it got
+        let arrived = !toPeak, closest = 1;
         const skXp = {};
         for (const p of res.plays) {
           xp += totalOf(p);
           wx += worth(p);
           for (const sk of SKILLS) skXp[sk] = (skXp[sk] || 0) + xpOf(p, sk);
+          if (!arrived) {
+            if (p.bar >= BAR_ZONES[0] && p.bar < BAR_ZONES[1]) arrived = true;
+            else {
+              closest = Math.min(closest, p.bar < BAR_ZONES[0] ? BAR_ZONES[0] - p.bar : p.bar - BAR_ZONES[1]);
+              mins += num(p.lengthMin) || 1;
+              continue;
+            }
+          }
           if (p.bar < limit) under = true;
           else if (under) crossed = true;
           // below Peak (not allowed): once you've reached Peak, dropping back below it rules the queue out too
@@ -1801,8 +1814,10 @@ export const mount = (meta, host) => {
           if ((under && p.bar >= limit) || (reached && !belowPeak && p.bar < BAR_ZONES[0])) outMins += len;
         }
         const last = res.samples[res.samples.length - 1] || {};
-        // out of range ranks below everything in range, the less time out the better (so steps can bring it back in)
-        return { total: xp, focusTotal: wx, score: crossed ? -1 - outMins / Math.max(1, mins) : wx / H, crossed, skXp, end: { bar: num(last.bar), minutes: num(last.minutes) } };
+        // out of range ranks below everything in range, the less time out the better (so steps can bring it back in);
+        // never reaching Peak (Get to Peak) ranks lower still, the closer it got the better
+        const score = !arrived ? -3 + (1 - closest) : crossed ? -1 - outMins / Math.max(1, mins) : wx / H;
+        return { total: xp, focusTotal: wx, score, crossed: crossed || !arrived, missed: !arrived, skXp, end: { bar: num(last.bar), minutes: num(last.minutes) } };
       };
       const seen = new Map();
       const reuse = { memoryLocal: r.memoryLocal, memory: r.memory, triesFrom: r.triesFrom, calib: r.calib, medals: r.medals, recent: r.recentPlays };
@@ -1819,7 +1834,7 @@ export const mount = (meta, host) => {
       };
       try {
         const base = await evalQ(queue.entries, { res: r, entries: queue.entries });
-        s.base = base.m.score; s.baseTotal = base.m.total; s.baseFocus = base.m.focusTotal; s.focusNames = [...focus].map(sk => SKILL_NAMES[sk]); s.baseEnd = base.m.end; s.baseCrossed = base.m.crossed;
+        s.base = base.m.score; s.baseTotal = base.m.total; s.baseFocus = base.m.focusTotal; s.focusNames = [...focus].map(sk => SKILL_NAMES[sk]); s.baseEnd = base.m.end; s.baseCrossed = base.m.crossed; s.baseMissed = base.m.missed;
         s.startBar = num((r.samples[0] || {}).bar);
         // each queue map's XP a minute in the forecast, against the queue's
         // each map's XP a minute in a queue's forecast, against that queue's average: worked out again for the queue
