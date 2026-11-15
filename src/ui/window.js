@@ -1112,6 +1112,8 @@ export const mount = (meta, host) => {
           const out = [];
           // an overall level past 100: one piece, this level to the next
           if (lifetime && start >= 100) return [L0, L0 + 1];
+          // the overall level past rebirth keeps going: one piece, this level to the next
+          if (overall && start >= need) return [L0, L0 + 1];
           // already able to prestige: one full piece up to its prestige level
           if (start >= need) return [need - 1, need];
           if (start < 100) {
