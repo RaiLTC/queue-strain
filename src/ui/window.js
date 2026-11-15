@@ -1226,11 +1226,13 @@ export const mount = (meta, host) => {
             above = k === 0 && f < 0.05;
             upLabels = `<span class="qs-lv-uplbl ${above ? 'above' : 'below'}" style="left:${(f * 100).toFixed(2)}%;${k === n - 1 && f > 0.9 ? ' transform:translateX(calc(-100% - 4px));' : ''}" title="${esc(upgradeText(next))}"><span class="k">#${next.k}</span> ${upgradeSoon(next)}</span>`;
           }
-          const label = `${b2}${at !== undefined ? ` · ${durH(at)}` : ''}`;
+          // the overall level past rebirth, its next level past the look-ahead: when, at the same pace kept up (~)
+          const guess = at === undefined && x.overall && last && x.start >= x.need && isFinite(x.nextSec) ? longDur(x.nextSec) : null;
+          const label = `${b2}${at !== undefined ? ` · ${durH(at)}` : guess ? ` · ${guess}` : ''}`;
           // a piece this queue completes within the look-ahead: its progress shifts to white (pink when it's the prestige)
           const completes = endF >= 1 && nowF < 1;
           cells.push(`<div class="qs-lv-cell"><div class="qs-lv-seg${last && soon ? ' shift' : completes ? ' complete' : ''}">${endF > nowF ? `<i class="gain" style="left:${nowF * 100}%; width:${(endF - nowF) * 100}%"></i>` : ''}<i style="width:${nowF * 100}%"></i>${upMarks}</div>${upLabels}
-            <span class="qs-lv-tk${last ? '' : ' mid'}${goal ? ' goal' : at !== undefined ? ' time' : ''}">${label}</span></div>`);
+            <span class="qs-lv-tk${last ? '' : ' mid'}${goal ? ' goal' : at !== undefined || guess ? ' time' : ''}">${label}</span></div>`);
         }
         // the two upgrades after the next one, faint: each its own line, its number under it (merged into one arrow, or
         // moved over the bar, once drawn: see the pass after rendering)

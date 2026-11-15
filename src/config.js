@@ -11,8 +11,8 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.4.011';
-export const VERSION_ID = '2026-11-15 overall past rebirth';
+export const VERSION = '1.4.012';
+export const VERSION_ID = '2026-11-15 overall next level time';
 
 // none / info / urgent
 export const NOTICE = {
@@ -48,7 +48,8 @@ export const HOTFIXES = {
   text: `v${VERSION} · 15 Nov 2026
 • An exception to the pause: Suggestions → Get to Peak builds a queue that takes you from Cold, Warming Up or Fatigued into Peak
 • Get to Peak: still suggests a queue when it leaves Peak later, and says after how long
-• Levels: the overall bar keeps counting past your rebirth level, one level at a time, instead of stopping there`,
+• Levels: the overall bar keeps counting past your rebirth level, one level at a time, instead of stopping there
+• Levels: the overall bar past rebirth shows about when you reach the next level, even past the look-ahead`,
 };
 
 // ---------------------------------------------------------------------
