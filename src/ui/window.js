@@ -1446,7 +1446,7 @@ export const mount = (meta, host) => {
                 <button type="button" class="qs-plain qs-sg-write" title="Write this queue to the playlist named here: created if it doesn't exist, replaced if it does">${sg.written === 'named' ? 'Written' : 'Write to playlist'}</button>
                 ${sg.writeError ? `<span style="color:#fca5a5;">${esc(sg.writeError)}</span>` : ''}
               </div></div>
-            <div class="qs-sg-end"><div class="qs-dim">After ${aheadText}</div><div class="qs-sg-endstate">${sgEnds(sg.best.end)}</div>
+            <div class="qs-sg-end"><div class="qs-dim">After ${aheadText}</div><div class="qs-sg-endstate">${sgEnds(sg.best.end)}</div>${sg.toPeak && sg.best.leaveAt >= 0 ? `<div style="color:#f87171;">Leaves Peak after ${durWords(sg.best.leaveAt)}</div>` : ''}
               ${sg.focusNames && sg.focusNames.length ? `<div style="margin-top:3px;"><span class="qs-dim">${esc(sg.focusNames.join(' + '))}</span></div><div><span class="qs-dim">XP</span> ${fmt(sg.baseFocus)} <span class="qs-dim">→</span> <b>${fmt(sg.best.focusTotal)}</b></div>${sgRates(sg.baseFocus, sg.best.focusTotal)}<div class="qs-dim" style="margin-top:3px;">All skills ${fmt(sg.baseTotal)} → ${fmt(sg.best.total)}</div>` : `<div style="margin-top:3px;"><span class="qs-dim">XP</span> ${fmt(sg.baseTotal)} <span class="qs-dim">→</span> <b>${fmt(sg.best.total)}</b></div>${sgRates(sg.baseTotal, sg.best.total)}`}</div>
           </div>
         </div>` : sg.running ? '' : `<div class="qs-dim" style="margin-top:8px;">${sg.checkedWorse ? 'The best change found looked better, but not once checked exactly: your queue stays as it is.' : 'No change found that gives this queue more XP an hour.'}</div>`;
@@ -1488,7 +1488,8 @@ export const mount = (meta, host) => {
         ${sg && sg.running ? `<div style="display:flex; gap:3px; margin-top:6px;" title="Steps 1-3 look for changes, steps 4-6 polish what they found. It ends early when nothing more helps.">${[1, 2, 3, 4, 5, 6].map(i => { const f = sgSegFrac(sg, i); return `<div style="flex:1; height:5px; border-radius:3px; background:rgba(255,255,255,0.12); overflow:hidden;"><div class="qs-sg-seg" style="width:${Math.round(f * 100)}%; height:100%; background:${i <= 3 ? '#60a5fa' : '#a78bfa'};"></div></div>`; }).join('')}</div>` : ''}
         <div style="display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:6px;" title="Ticked skills: suggestions get them the most XP they can, whatever the others get. None ticked: the most XP in all."><span class="qs-dim">Focus on</span>${SKILLS.map(sk => `<label class="qs-dim" style="display:flex; align-items:center; gap:3px;"><input class="qs-sg-focus" data-sk="${sk}" type="checkbox"${sgFocus.includes(sk) ? ' checked' : ''}${sg && sg.running ? ' disabled' : ''} style="margin:0;">${SKILL_NAMES[sk]}</label>`).join('')}</div>
         ${sg && sg.error ? `<div style="color:#fca5a5; margin-top:6px;">${esc(sg.error)}</div>` : ''}
-        ${sg && sg.baseCrossed && !sg.running ? `<div style="margin-top:8px; color:#f87171;">Your queue as it is ${sg.baseMissed ? 'doesn’t get you to Peak' : sg.pastPeak && sg.belowPeak ? 'goes past the XP cut' : 'leaves Peak'}. The suggestions below keep you ${sg.pastPeak && sg.belowPeak ? 'under the XP cut' : 'within your limits'}.</div>` : ''}
+        ${sg && !sg.running && !sg.baseCrossed && sg.toPeak && sg.baseLeaveAt >= 0 ? `<div style="margin-top:8px; color:#f87171;">Your queue as it is leaves Peak after ${durWords(sg.baseLeaveAt)}.</div>` : ''}
+        ${sg && sg.baseCrossed && !sg.running ? `<div style="margin-top:8px; color:#f87171;">Your queue as it is ${sg.baseMissed ? 'doesn’t get you to Peak' : sg.pastPeak && sg.belowPeak ? 'goes past the XP cut' : 'leaves Peak'}${!sg.baseMissed && sg.baseLeaveAt >= 0 ? ` after ${durWords(sg.baseLeaveAt)}` : ''}. The suggestions below keep you ${sg.pastPeak && sg.belowPeak ? 'under the XP cut' : 'within your limits'}.</div>` : ''}
         ${sgBest}
         ${sgCompare}
         ${sgSingles}
@@ -1790,7 +1791,7 @@ export const mount = (meta, host) => {
         const limit = pastPeak ? XP_CUT : BAR_ZONES[1];
         let xp = 0, wx = 0, under = false, crossed = false, reached = false, mins = 0, outMins = 0;
         // Get to Peak: until the queue first brings you into Peak, the limits don't apply yet; how close it got
-        let arrived = !toPeak, closest = 1;
+        let arrived = !toPeak, closest = 1, leaveAt = -1;
         const skXp = {};
         for (const p of res.plays) {
           xp += totalOf(p);
@@ -1806,9 +1807,11 @@ export const mount = (meta, host) => {
           }
           if (p.bar < limit) under = true;
           else if (under) crossed = true;
+          if (crossed && leaveAt < 0) leaveAt = num(p.start);
           // below Peak (not allowed): once you've reached Peak, dropping back below it rules the queue out too
           if (p.bar >= BAR_ZONES[0]) reached = true;
           else if (reached && !belowPeak) crossed = true;
+          if (crossed && leaveAt < 0) leaveAt = num(p.start);
           const len = num(p.lengthMin) || 1;
           mins += len;
           if ((under && p.bar >= limit) || (reached && !belowPeak && p.bar < BAR_ZONES[0])) outMins += len;
@@ -1816,8 +1819,10 @@ export const mount = (meta, host) => {
         const last = res.samples[res.samples.length - 1] || {};
         // out of range ranks below everything in range, the less time out the better (so steps can bring it back in);
         // never reaching Peak (Get to Peak) ranks lower still, the closer it got the better
-        const score = !arrived ? -3 + (1 - closest) : crossed ? -1 - outMins / Math.max(1, mins) : wx / H;
-        return { total: xp, focusTotal: wx, score, crossed: crossed || !arrived, missed: !arrived, skXp, end: { bar: num(last.bar), minutes: num(last.minutes) } };
+        // Get to Peak: leaving Peak later doesn't rule a queue out, it only gets a warning (when it leaves)
+        const out = toPeak ? !arrived : crossed;
+        const score = !arrived ? -3 + (1 - closest) : out ? -1 - outMins / Math.max(1, mins) : wx / H;
+        return { total: xp, focusTotal: wx, score, crossed: out, missed: !arrived, leaveAt, skXp, end: { bar: num(last.bar), minutes: num(last.minutes) } };
       };
       const seen = new Map();
       const reuse = { memoryLocal: r.memoryLocal, memory: r.memory, triesFrom: r.triesFrom, calib: r.calib, medals: r.medals, recent: r.recentPlays };
@@ -1834,7 +1839,7 @@ export const mount = (meta, host) => {
       };
       try {
         const base = await evalQ(queue.entries, { res: r, entries: queue.entries });
-        s.base = base.m.score; s.baseTotal = base.m.total; s.baseFocus = base.m.focusTotal; s.focusNames = [...focus].map(sk => SKILL_NAMES[sk]); s.baseEnd = base.m.end; s.baseCrossed = base.m.crossed; s.baseMissed = base.m.missed;
+        s.base = base.m.score; s.baseTotal = base.m.total; s.baseFocus = base.m.focusTotal; s.focusNames = [...focus].map(sk => SKILL_NAMES[sk]); s.baseEnd = base.m.end; s.baseCrossed = base.m.crossed; s.baseMissed = base.m.missed; s.baseLeaveAt = base.m.leaveAt;
         s.startBar = num((r.samples[0] || {}).bar);
         // each queue map's XP a minute in the forecast, against the queue's
         // each map's XP a minute in a queue's forecast, against that queue's average: worked out again for the queue
@@ -1965,7 +1970,7 @@ export const mount = (meta, host) => {
           for (const q of found.sort((a, b) => b.m.score - a.m.score)) { const k = keyOf(q.entries); if (!kept.has(k)) kept.set(k, q); if (kept.size >= 3) break; }
           beam = [...kept.values()];
           const top = beam[0];
-          if (!top.m.crossed && top.m.score > bestScore) { bestScore = top.m.score; s.best = { steps: top.steps, total: top.m.total, focusTotal: top.m.focusTotal, end: top.m.end, entries: top.entries }; }
+          if (!top.m.crossed && top.m.score > bestScore) { bestScore = top.m.score; s.best = { steps: top.steps, total: top.m.total, focusTotal: top.m.focusTotal, end: top.m.end, leaveAt: top.m.leaveAt, entries: top.entries }; }
         }
       } catch (e) { s.error = `Couldn't finish: ${e && e.message ? e.message : e}`; }
       // the result, checked: the suggested queue forecast exactly (real simulations, nothing borrowed) against your

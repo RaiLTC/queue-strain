@@ -11,8 +11,8 @@
 
 // What you edit for a release: the version, the notice, the changelog, settings and every text players see.
 
-export const VERSION = '1.4.09';
-export const VERSION_ID = '2026-11-15 get to peak';
+export const VERSION = '1.4.010';
+export const VERSION_ID = '2026-11-15 leaves peak';
 
 // none / info / urgent
 export const NOTICE = {
@@ -46,7 +46,8 @@ export const HOTFIXES = {
   id: VERSION_ID,
   notify: true,
   text: `v${VERSION} · 15 Nov 2026
-• An exception to the pause: Suggestions → Get to Peak builds a queue that takes you from Cold, Warming Up or Fatigued into Peak`,
+• An exception to the pause: Suggestions → Get to Peak builds a queue that takes you from Cold, Warming Up or Fatigued into Peak
+• Get to Peak: still suggests a queue when it leaves Peak later, and says after how long`,
 };
 
 // ---------------------------------------------------------------------
